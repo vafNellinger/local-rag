@@ -1,0 +1,120 @@
+# Plattformklassen und Rollenzuweisung.
+#
+# Die Klassifizierung erfolgt in rag/detect.py anhand von nutzbarem VRAM und
+# der Frage, ob der Speicher mit der CPU geteilt wird (iGPU). Jede Klasse legt
+# pro Rolle fest, auf welchem Gerät das Modell läuft.
+#
+# Grundregel für die Gerätezuweisung: die GPU gehört der Rolle, an der die
+# Antwortlatenz hängt — dem Generator. Embedding ist beim Ingest Batch-Arbeit
+# und darf langsamer sein; der Reranker sieht pro Query nur ~20 kurze
+# Kandidaten. Auf knappem VRAM wandern beide auf die CPU, damit der Generator
+# sein Kontextfenster behält.
+
+[roles]
+# Rollen, die das System kennt. "generator" wird dynamisch über whichllm
+# aufgelöst, die übrigen über die Tabellen weiter unten.
+dynamic = ["generator"]
+static = ["embedder", "reranker"]
+
+
+# ─── Embedder ────────────────────────────────────────────────────────────────
+# Muss multilingual sein: die Zieldokumente sind überwiegend deutsch, ein
+# englischlastiger Embedder ruiniert das Retrieval, bevor der Generator
+# überhaupt zum Einsatz kommt.
+#
+# TODO(Schritt 2): gegen aktuelle MTEB-Zahlen prüfen, bevor festgeschrieben.
+# Diese Auswahl ist ein begründeter Startpunkt, keine gemessene Wahrheit.
+
+[embedder.default]
+model_id = "BAAI/bge-m3"
+dimensions = 1024
+max_seq_length = 8192
+# Grober Resident-Bedarf in FP16, für die Budgetrechnung in resolve.py.
+vram_estimate_mb = 1100
+
+[embedder.alternative]
+model_id = "intfloat/multilingual-e5-large"
+dimensions = 1024
+max_seq_length = 512
+vram_estimate_mb = 1100
+
+
+# ─── Reranker ────────────────────────────────────────────────────────────────
+
+[reranker.default]
+model_id = "BAAI/bge-reranker-v2-m3"
+max_seq_length = 8192
+vram_estimate_mb = 1100
+
+
+# ─── Plattformklassen ────────────────────────────────────────────────────────
+
+[platform_class.cpu_only]
+description = "Keine nutzbare GPU"
+generator_device = "cpu"
+embedder_device = "cpu"
+reranker_device = "cpu"
+# Reranking auf CPU ohne GPU-Generator verdoppelt die Query-Latenz für
+# vergleichsweise wenig Qualitätsgewinn — hier optional.
+reranker_enabled = false
+context_length = "8k"
+whichllm_args = ["--cpu-only"]
+
+# Übersteuert [generator] für diese Klasse. Ohne GPU ist Langsamkeit
+# eingepreist: whichllms "--speed usable" lässt auf CPU nur noch Modelle
+# unter 2B übrig, was die globale 3B-Untergrenze unerfüllbar macht. Auf CPU
+# akzeptiert man einstellige tok/s und wählt stattdessen nach Qualität.
+[platform_class.cpu_only.generator]
+speed = "any"
+min_params_b = 1.5
+
+[platform_class.igpu_shared]
+description = "Integrierte GPU mit geteiltem Speicher (<= 10 GB)"
+generator_device = "gpu"
+embedder_device = "cpu"
+reranker_device = "cpu"
+reranker_enabled = true
+context_length = "32k"
+whichllm_args = []
+
+[platform_class.dgpu_small]
+description = "Dedizierte GPU, 10-20 GB"
+generator_device = "gpu"
+embedder_device = "gpu"
+reranker_device = "cpu"
+reranker_enabled = true
+context_length = "32k"
+whichllm_args = []
+
+[platform_class.dgpu_large]
+description = "Dedizierte GPU, > 20 GB"
+generator_device = "gpu"
+embedder_device = "gpu"
+reranker_device = "gpu"
+reranker_enabled = true
+context_length = "64k"
+whichllm_args = []
+
+
+# ─── Generator-Auswahl ───────────────────────────────────────────────────────
+
+[generator]
+# whichllm kennt kein RAG-Profil; "general" ist die nächstbeste Annäherung.
+profile = "general"
+# Nur Modelle mit direkter Benchmark-Evidenz, keine vererbten Scores.
+evidence = "base"
+speed = "usable"
+
+# Reasoning-Modelle kosten pro Query spürbar Latenz durch Thinking-Tokens.
+# Bei RAG steht die Antwort im Kontext — der Reasoning-Aufwand zahlt sich
+# kaum aus. whichllm rankt sie trotzdem nach oben, also filtern wir nach.
+# Vorgriff auf das, was ein echtes rag-Profil im Tool selbst tun müsste.
+exclude_name_patterns = ["thinking", "-r1-", "reasoning", "qwq"]
+
+# Untergrenze: darunter wird Instruktionstreue auf langen Kontexten unzuverlässig.
+min_params_b = 3.0
+
+# Quantisierung unter Q4 verliert genau das, was RAG braucht — wörtliche Treue
+# zum Kontext und Zitierfähigkeit. whichllms Penalty für Q3_K_M (8 %) ist dafür
+# zu mild, deshalb hier eine harte Grenze.
+min_quant_tier = "Q4_K_S"
