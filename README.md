@@ -57,9 +57,43 @@ deshalb:
   in `engine/compatibility.py`, nutzt es aber nicht im Ranking — ein Modell
   mit 8k Fenster kann bei `-c 32k` auf Platz 1 stehen, mit einer Warnung, die
   leicht untergeht.
+- **Sprachfilter** (siehe unten) und **Base-Modell-Ausschluss**: `-pt` ist bei
+  Google die Endung für `pretrained`, das Gegenstück zum instruction-tuned
+  `-it`. Ein Base-Modell folgt keiner Anweisung und taugt nicht für RAG.
 
-Die ersten drei sind Konfiguration in `platforms.toml`, der vierte ist Code.
-Alle vier sind Kandidaten für einen späteren Upstream-Beitrag.
+Die meisten davon sind Konfiguration in `platforms.toml`, Kontextfenster und
+Sprache sind Code. Alle sind Kandidaten für einen späteren Upstream-Beitrag.
+
+## Sprachfilter
+
+Die Zieldokumente sind deutsch, also muss der Generator Deutsch können.
+whichllm hat kein Sprachkonzept, und die HF-Metadaten sind lückenhaft.
+Gemessen über 59 reale Kandidaten:
+
+| | Anzahl |
+|---|---|
+| ohne jeden `language`-Tag | 32 |
+| getaggt, ohne `de`/`multilingual` | 19 |
+| getaggt, mit `de`/`multilingual` | 8 |
+
+Unter den 32 untaggten sind Qwen3 und Gemma — beide ausgeprägt multilingual.
+Ein harter Positiv-Filter würde also die stärksten Kandidaten verwerfen.
+`rag/hfmeta.py` prüft deshalb dreistufig, von billig nach teuer:
+
+1. **Namensmuster** (kein Netzzugriff): Modelle mit fremder Zielsprache tragen
+   sie fast immer im Namen (`elyza`, `swallow`, `chatglm`, …).
+2. **Vorhandene Tags**: fehlt die Zielsprache und ist das Modell nicht als
+   `multilingual` markiert → raus. Sortiert real Llama-2/3, Mistral-7B-v0.1,
+   Phi-3, Olmo, Falcon und Qwen2.5 aus.
+3. **Keine Tags** → durchlassen, fehlende Metadaten disqualifizieren nicht.
+
+Repackager übernehmen Sprachtags nicht immer korrekt (`unsloth/Qwen3-8B-GGUF`
+ist als reines `en` getaggt); solche Repos lassen sich über `ignore_tags_for`
+freistellen. Ergebnisse werden 7 Tage in `~/.cache/local-rag/` gecacht, die
+Abfrage läuft fail-open — ohne Netz bricht die Auflösung nicht ab.
+
+Zielsprache umstellen: `target` unter `[generator.language]` in
+`config/platforms.toml`.
 
 ## Plattformklassen
 

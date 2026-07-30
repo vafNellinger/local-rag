@@ -111,6 +111,13 @@ speed = "usable"
 # Vorgriff auf das, was ein echtes rag-Profil im Tool selbst tun müsste.
 exclude_name_patterns = ["thinking", "-r1-", "reasoning", "qwq"]
 
+# Base-Modelle ohne Instruction-Tuning. Google markiert sie mit "-pt"
+# (pretrained), das Gegenstück zum instruction-tuned "-it" — beides hat nichts
+# mit Sprachen zu tun. Ein Base-Modell folgt keiner Anweisung und ist für RAG
+# unbrauchbar. Als Endung geprüft, nicht als Substring, damit "-pt" nicht
+# mitten in einem Namen fehlzündet.
+exclude_name_suffixes = ["-pt"]
+
 # Untergrenze: darunter wird Instruktionstreue auf langen Kontexten unzuverlässig.
 min_params_b = 3.0
 
@@ -118,3 +125,38 @@ min_params_b = 3.0
 # zum Kontext und Zitierfähigkeit. whichllms Penalty für Q3_K_M (8 %) ist dafür
 # zu mild, deshalb hier eine harte Grenze.
 min_quant_tier = "Q4_K_S"
+
+
+# ─── Sprachfilter ────────────────────────────────────────────────────────────
+# whichllm hat kein Sprachkonzept. Die HF-Model-API liefert cardData.language,
+# aber lückenhaft: von 59 gemessenen Kandidaten hatten 32 gar keinen Tag,
+# darunter die komplette Qwen3-Familie und Gemma — beide ausgeprägt
+# multilingual. Ein harter Positiv-Filter würde also genau die besten
+# Kandidaten verwerfen.
+#
+# Deshalb: vorhandene Tags auswerten, fehlende nicht bestrafen. Das sortiert
+# in der Messung 19 tatsächlich englischzentrierte Modelle aus (Llama-2/3,
+# Mistral-7B-v0.1, Phi-3, Olmo, Falcon, Qwen2.5) und lässt die untaggten durch.
+
+[generator.language]
+target = "de"
+
+# Modelle, die auf eine andere Sprache spezialisiert sind, tragen das fast
+# immer im Namen. Billigster und zuverlässigster Teil des Filters, weil ohne
+# Netzzugriff.
+exclude_name_patterns = [
+    "japanese", "swallow", "elyza", "sarashina", "rakuten",
+    "chinese", "yi-", "chatglm", "baichuan",
+    "korean", "kullm", "polyglot-ko",
+    "vietnamese", "vinallama",
+    "vikhr", "saiga",
+    "sauerkraut",  # deutsch-spezialisiert, aber Derivat ohne eigenen Benchmark
+]
+
+# Bekannter Sonderfall: Repackager übernehmen den Sprachtag nicht immer
+# korrekt. unsloth/Qwen3-8B-GGUF ist als reines 'en' getaggt, obwohl das
+# Originalmodell multilingual ist. Solche Repos hier freistellen, damit der
+# Tag-Fehler des Repackagers das Modell nicht disqualifiziert.
+ignore_tags_for = [
+    "unsloth/Qwen3-8B-GGUF",
+]

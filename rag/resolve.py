@@ -17,6 +17,7 @@ import logging
 from dataclasses import dataclass, field
 
 from rag.detect import Platform, load_config, run_whichllm
+from rag.hfmeta import language_verdict
 
 logger = logging.getLogger(__name__)
 
@@ -242,8 +243,14 @@ def _resolve_generator(
     )
 
     exclude = [p.lower() for p in gen_config.get("exclude_name_patterns", [])]
+    exclude_suffixes = [s.lower() for s in gen_config.get("exclude_name_suffixes", [])]
     min_params_b = float(gen_config.get("min_params_b", 0.0))
     min_quant = str(gen_config.get("min_quant_tier", "Q4_K_S"))
+
+    lang_config = gen_config.get("language", {})
+    lang_target = str(lang_config.get("target", "")).strip()
+    lang_exclude = tuple(lang_config.get("exclude_name_patterns", []))
+    lang_ignore = {str(m).lower() for m in lang_config.get("ignore_tags_for", [])}
 
     rejected: list[str] = []
     fallback: tuple[dict, str] | None = None
@@ -260,6 +267,13 @@ def _resolve_generator(
             rejected.append(f"{model_id}: Namensmuster '{hit}' ausgeschlossen")
             continue
 
+        # Suffix-Prüfung getrennt von der Substring-Prüfung: "-pt" markiert bei
+        # Google ein Base-Modell ohne Instruction-Tuning (Gegenstück zu "-it"),
+        # als Substring würde es aber irgendwo mitten im Namen fehlzünden.
+        if hit := next((s for s in exclude_suffixes if lower.endswith(s)), None):
+            rejected.append(f"{model_id}: Endung '{hit}' — Base-Modell ohne Instruct")
+            continue
+
         params_b = float(candidate.get("parameter_count") or 0) / 1e9
         if params_b < min_params_b:
             rejected.append(f"{model_id}: {params_b:.1f}B < {min_params_b}B Minimum")
@@ -273,6 +287,21 @@ def _resolve_generator(
         if warning := _context_truncation_warning(candidate):
             rejected.append(f"{model_id}: {warning}")
             continue
+
+        # Bewusst als letzte Prüfung: als einzige kostet sie einen
+        # HTTP-Request. Kandidaten, die schon an Quantisierung oder
+        # Kontextfenster scheitern, lösen so gar keine Abfrage aus.
+        if lang_target:
+            verdict = language_verdict(
+                model_id,
+                lang_target,
+                exclude_name_patterns=lang_exclude,
+                ignore_tags=lower in lang_ignore,
+                use_cache=use_cache,
+            )
+            if not verdict.ok:
+                rejected.append(f"{model_id}: {verdict.reason}")
+                continue
 
         fit_type = str(candidate.get("fit_type", ""))
         if device == "gpu" and fit_type != "full_gpu":
