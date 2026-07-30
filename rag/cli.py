@@ -11,7 +11,7 @@ from rich.table import Table
 from pathlib import Path
 
 from rag.detect import Platform, WhichllmError, detect_local, simulate
-from rag.extract import ExtractionError, extract
+from rag.extract import ExtractionError, convert, probe
 from rag.resolve import PipelinePlan, ResolutionError, resolve_pipeline
 
 app = typer.Typer(
@@ -167,7 +167,7 @@ def inspect(
 
     for file_path in files:
         try:
-            doc = extract(file_path)
+            doc = probe(file_path)
         except ExtractionError as exc:
             failures.append((file_path, str(exc)))
             continue
@@ -218,6 +218,48 @@ def inspect(
 
     for path, reason in failures:
         console.print(f"  [red]x[/] {path.name}: {reason}")
+    console.print()
+
+
+@app.command(name="convert")
+def convert_cmd(
+    path: Path = typer.Argument(..., help="Zu konvertierende Datei"),
+    out: Path | None = typer.Option(None, "-o", "--out", help="Markdown hierhin"),
+    ocr: bool | None = typer.Option(
+        None, "--ocr/--no-ocr", help="OCR erzwingen oder unterdrücken"
+    ),
+    show: int = typer.Option(0, "--show", help="Erste N Zeichen ausgeben"),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Debug-Ausgabe"),
+) -> None:
+    """Extrahiere ein Dokument als strukturiertes Markdown."""
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.ERROR,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+
+    try:
+        doc = convert(path, ocr=ocr)
+    except ExtractionError as exc:
+        console.print(f"[red]Fehler:[/] {exc}")
+        raise typer.Exit(1) from exc
+
+    ocr_note = "[yellow]mit OCR[/]" if doc.ocr_used else "[dim]ohne OCR[/]"
+    # Tausendertrennung nur auf der Zahl, nicht auf dem ganzen Satz — sonst
+    # werden auch die Kommas zwischen den Feldern zu Punkten.
+    chars = f"{doc.char_count:,}".replace(",", ".")
+    console.print(
+        f"\n[bold]{doc.path.name}[/] — {doc.format}, {doc.page_count} Seite(n), "
+        f"{chars} Zeichen, {ocr_note}, {doc.duration_seconds:.1f}s"
+    )
+    for warning in doc.warnings:
+        console.print(f"  [yellow]![/] {warning}")
+
+    if out:
+        out.write_text(doc.markdown, encoding="utf-8")
+        console.print(f"  geschrieben nach [cyan]{out}[/]")
+    if show:
+        console.print()
+        console.print(doc.markdown[:show])
     console.print()
 
 

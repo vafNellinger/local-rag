@@ -17,7 +17,7 @@ from rag.extract import (
     Page,
     _classify_page,
     _replacement_ratio,
-    extract,
+    probe,
 )
 
 VIEL_TEXT = "Die Ordnungsgemäßheit der Buchführung wird bestätigt. " * 5
@@ -114,33 +114,33 @@ class TestDocument:
         assert Document(path=None, format="pdf").ocr_ratio == 0.0
 
 
-class TestExtractDispatch:
+class TestProbeDispatch:
     def test_fehlende_datei(self, tmp_path):
         with pytest.raises(ExtractionError, match="nicht gefunden"):
-            extract(tmp_path / "gibtsnicht.pdf")
+            probe(tmp_path / "gibtsnicht.pdf")
 
     def test_altes_word_format_nennt_den_weg(self, tmp_path):
         legacy = tmp_path / "alt.doc"
         legacy.write_bytes(b"egal")
         with pytest.raises(ExtractionError, match="libreoffice"):
-            extract(legacy)
+            probe(legacy)
 
     def test_unbekanntes_format(self, tmp_path):
         weird = tmp_path / "datei.xyz"
         weird.write_text("inhalt")
         with pytest.raises(ExtractionError, match="nicht unterstützt"):
-            extract(weird)
+            probe(weird)
 
     def test_markdown_wird_gelesen(self, tmp_path):
         md = tmp_path / "notiz.md"
         md.write_text("# Überschrift\n\nInhalt mit Umlauten: äöü", encoding="utf-8")
-        doc = extract(md)
+        doc = probe(md)
         assert doc.format == "markdown"
         assert "Überschrift" in doc.text
 
     def test_latin1_fallback(self, tmp_path):
         txt = tmp_path / "alt.txt"
         txt.write_bytes("Grüße aus München".encode("latin-1"))
-        doc = extract(txt)
+        doc = probe(txt)
         assert "Grüße" in doc.text
         assert any("latin-1" in w for w in doc.warnings)

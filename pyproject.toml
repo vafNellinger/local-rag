@@ -9,13 +9,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Erst ab Schritt 2 (Ingest) nötig — hier bewusst noch nicht installiert,
-# damit Schritt 1 ohne Torch-Download testbar bleibt.
+# Extraktion und Indizierung. docling bringt Torch mit (~2 GB) und lädt beim
+# ersten Lauf Layout- und OCR-Modelle nach. easyocr ist explizit gelistet,
+# weil docling sonst RapidOCR wählt, dessen Standardmodelle auf
+# Chinesisch/Englisch zielen und bei deutschen Umlauten unzuverlässig sind.
 ingest = [
+    "docling>=2.116",
+    "easyocr>=1.7",
+    "pypdf>=5.0",
+    "pillow>=10.0",
+    "python-docx>=1.1",
     "sentence-transformers>=3.0",
     "sqlite-vec>=0.1",
-    "pypdf>=5.0",
-    "python-docx>=1.1",
 ]
 generate = [
     "llama-cpp-python>=0.3",

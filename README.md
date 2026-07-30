@@ -33,6 +33,10 @@ rag plan --gpu "RTX 4090"     # Zielrechner simulieren, ohne dort zu sein
 rag plan --vram 16            # nutzbares VRAM überschreiben
 rag plan --cpu-only
 rag plan --refresh            # whichllm-Cache umgehen (dauert Minuten)
+
+rag inspect ~/dokumente       # was ist extrahierbar, wo ist OCR nötig
+rag convert datei.pdf -o out.md
+rag convert scan.pdf --ocr    # OCR erzwingen statt automatisch entscheiden
 ```
 
 Ergebnisse werden 24 h in `~/.cache/local-rag/` gecacht; ein
@@ -107,17 +111,56 @@ Zielsprache umstellen: `target` unter `[generator.language]` in
 Geteilter Speicher schlägt die VRAM-Zahl: bei einer APU konkurriert jedes
 GPU-resident geladene Modell direkt mit dem System-RAM.
 
+## Extraktion
+
+Zwei Stufen, weil sie zehnfach unterschiedlich teuer sind:
+
+`probe()` liest den Text-Layer mit pypdf und klassifiziert jede Seite.
+`convert()` macht die eigentliche Arbeit über Docling — Layout, Tabellen,
+Überschriften, bei Bedarf OCR (EasyOCR, `de`+`en`).
+
+Gemessen auf dieser Maschine (CPU): **~0,8 s pro Seite ohne OCR, ~8,5 s mit
+OCR.** Bei 1000 Seiten mit 10 % Scans sind das 29 Minuten selektiv gegen 2,4
+Stunden pauschal — deshalb entscheidet `probe()` vorab pro Seite.
+
+Ein PDF ist zwei Formate in einer Datei: digital erzeugte Seiten mit
+Text-Layer und gescannte Seiten, die nur ein Bild enthalten. Gemischt ist der
+Normalfall, also fällt die Entscheidung pro Seite. Vier Zustände:
+
+| Status | Bedeutung |
+|---|---|
+| `text` | Text-Layer brauchbar |
+| `scan` | kein Text, aber seitenfüllendes Bild → OCR hilft |
+| `sparse` | kein Text **und** kein Bild → Seite ist leer, OCR bringt nichts |
+| `error` | kaputte Kodierung ohne Bild → OCR kann auch nicht helfen |
+
+Die Bildprüfung trennt `sparse` von `scan` und hat einen echten Fehlalarm
+gefunden: eine Seite mit 60 Zeichen und ohne jedes Bild war als Scan markiert.
+OCR hätte dort ein leeres Blatt abgetastet. Eine Mindestpixelfläche trennt
+Seitenscans von Kopfzeilen-Logos.
+
+OCR-Qualität am erzeugten deutschen Testscan verifiziert — Umlaute und ß
+fehlerfrei („Änderungsantrag", „Größen", „gemäß", „Jürgen Öztürk").
+
+Altformate (`.doc`, `.ppt`, `.xls`, `.pages`) scheitern mit dem
+Konvertierungsbefehl in der Meldung statt mit einem pauschalen „nicht
+unterstützt".
+
 ## Tests
 
 ```bash
 uv pip install -e ".[dev]" && pytest -q
 ```
 
-Getestet wird die Entscheidungslogik ohne whichllm-Aufruf.
+Getestet wird die Entscheidungslogik, ohne whichllm-Aufruf und ohne Netz.
 
 ## Nächste Schritte
 
-2. Ingest: Datei → Text → Chunks → bge-m3 → sqlite-vec
+2. **Ingest** (angefangen): Extraktion steht, fehlen Chunking → bge-m3 → sqlite-vec
 3. Query: Retrieval → Rerank → Prompt → llama-cpp-python
 4. Messen: Latenz pro Stufe, Ingest-Durchsatz
 5. whichllm erweitern: Rollen, MTEB-Adapter, Budget-Allokation
+
+Offen: Phasen-getrenntes VRAM-Budget (Ingest lädt keinen Generator, Query kein
+OCR). Auf dieser Maschine ohne Wirkung, weil Torch die AMD-iGPU nicht sieht —
+relevant erst mit einem NVIDIA-Zielrechner.

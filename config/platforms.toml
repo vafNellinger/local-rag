@@ -47,6 +47,27 @@ max_seq_length = 8192
 vram_estimate_mb = 1100
 
 
+# ─── OCR / Extraktion ────────────────────────────────────────────────────────
+# Läuft über Docling (Layout, Tabellen, Überschriften) mit EasyOCR als
+# Texterkennung. Nur die Ingest-Phase betroffen, nie eine Query.
+#
+# Messwerte auf dieser Maschine (12 Kerne, CPU):
+#   ohne OCR  ~0,8 s pro Seite
+#   mit OCR   ~8,5 s pro Seite
+# Faktor 10 — deshalb entscheidet die Voranalyse in extract.probe() pro Seite,
+# ob OCR überhaupt läuft, statt es pauschal einzuschalten.
+#
+# Zum Gerät: OCR könnte die GPU nutzen, weil beim Ingest kein Generator
+# geladen ist. Auf dieser Maschine geht das trotzdem nicht — installiert ist
+# der CUDA-Build von Torch (cuda.is_available False, kein HIP), die Radeon
+# 890M bleibt für Torch unsichtbar. Dafür bräuchte es einen ROCm-Torch.
+# Auf Plattformen mit NVIDIA-GPU ist "gpu" hier sinnvoll.
+
+[ocr]
+langs = ["de", "en"]
+device = "cpu"
+
+
 # ─── Plattformklassen ────────────────────────────────────────────────────────
 
 [platform_class.cpu_only]
