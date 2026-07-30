@@ -8,7 +8,10 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from pathlib import Path
+
 from rag.detect import Platform, WhichllmError, detect_local, simulate
+from rag.extract import ExtractionError, extract
 from rag.resolve import PipelinePlan, ResolutionError, resolve_pipeline
 
 app = typer.Typer(
@@ -129,6 +132,93 @@ def plan(
         raise typer.Exit(1) from exc
 
     _render(result)
+
+
+@app.command()
+def inspect(
+    paths: list[Path] = typer.Argument(..., help="Dateien oder Verzeichnisse"),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Debug-Ausgabe"),
+) -> None:
+    """Prüfe, was aus Dokumenten extrahierbar ist und wo OCR nötig wäre."""
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+
+    files: list[Path] = []
+    for entry in paths:
+        if entry.is_dir():
+            files.extend(sorted(p for p in entry.rglob("*") if p.is_file()))
+        else:
+            files.append(entry)
+
+    table = Table(show_lines=False)
+    table.add_column("Datei", overflow="fold")
+    table.add_column("Format")
+    table.add_column("Seiten", justify="right")
+    table.add_column("Zeichen", justify="right")
+    table.add_column("Scan/OCR", justify="right")
+    table.add_column("leer", justify="right")
+
+    total_pages = 0
+    total_ocr = 0
+    total_sparse = 0
+    failures: list[tuple[Path, str]] = []
+
+    for file_path in files:
+        try:
+            doc = extract(file_path)
+        except ExtractionError as exc:
+            failures.append((file_path, str(exc)))
+            continue
+
+        ocr_pages = len(doc.pages_needing_ocr)
+        sparse_pages = len(doc.sparse_pages)
+        total_pages += len(doc.pages)
+        total_ocr += ocr_pages
+        total_sparse += sparse_pages
+
+        if ocr_pages == 0:
+            ocr_cell = "[green]nein[/]"
+        elif ocr_pages == len(doc.pages):
+            ocr_cell = f"[red]alle {ocr_pages}[/]"
+        else:
+            ocr_cell = f"[yellow]{ocr_pages} von {len(doc.pages)}[/]"
+
+        table.add_row(
+            file_path.name,
+            doc.format,
+            str(len(doc.pages)),
+            f"{doc.char_count:,}".replace(",", "."),
+            ocr_cell,
+            f"[dim]{sparse_pages}[/]" if sparse_pages else "—",
+        )
+        for page in doc.pages:
+            if page.status == "error":
+                table.add_row(
+                    "", "", f"[red]S.{page.number}[/]", f"[red]{page.note}[/]", "", ""
+                )
+        for warning in doc.warnings:
+            table.add_row("", "", "", f"[yellow]{warning}[/]", "", "")
+
+    console.print()
+    console.print(table)
+
+    if total_pages:
+        share = total_ocr / total_pages
+        console.print(
+            f"\n  {total_ocr} von {total_pages} Seiten brauchen OCR "
+            f"([bold]{share:.0%}[/])"
+        )
+        if total_sparse:
+            console.print(
+                f"  {total_sparse} Seite(n) ohne Text und ohne Bild — "
+                "[dim]kein OCR nötig, dort ist nichts[/]"
+            )
+
+    for path, reason in failures:
+        console.print(f"  [red]x[/] {path.name}: {reason}")
+    console.print()
 
 
 if __name__ == "__main__":
