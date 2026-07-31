@@ -2,8 +2,9 @@
 
 Lokales RAG-System, dessen Modellauswahl von der Zielplattform abhängt.
 
-Stand: **Schritt 1 von 5** — Plattformerkennung und Modellauflösung stehen.
-Ingest und Query fehlen noch.
+Stand: **Schritt 2 von 5** — Plattformerkennung, Modellauflösung und der
+komplette Ingest stehen: Extraktion, Chunking, Embedding, Index, Vektorsuche.
+Reranking und Generierung fehlen noch.
 
 ## Idee
 
@@ -37,6 +38,13 @@ rag plan --refresh            # whichllm-Cache umgehen (dauert Minuten)
 rag inspect ~/dokumente       # was ist extrahierbar, wo ist OCR nötig
 rag convert datei.pdf -o out.md
 rag convert scan.pdf --ocr    # OCR erzwingen statt automatisch entscheiden
+
+rag ingest ~/dokumente        # extrahieren, chunken, embedden, indizieren
+rag ingest ~/dokumente --prune   # verschwundene Dateien aus dem Index werfen
+rag ingest datei.pdf --force     # auch unverändert neu einlesen
+rag status                    # was liegt im Index
+rag search "Wie lang ist die Kündigungsfrist?"
+rag search "Löschfristen" -n 10 --full
 ```
 
 Ergebnisse werden 24 h in `~/.cache/local-rag/` gecacht; ein
@@ -146,21 +154,112 @@ Altformate (`.doc`, `.ppt`, `.xls`, `.pages`) scheitern mit dem
 Konvertierungsbefehl in der Meldung statt mit einem pauschalen „nicht
 unterstützt".
 
+## Chunking
+
+Docling liefert Überschriften, Tabellen und Absätze. Ein Chunker, der alle N
+Zeichen schneidet, wirft genau das weg — `rag/chunk.py` arbeitet deshalb auf
+Blöcken. Drei Entscheidungen tragen den Rest:
+
+- **Überschriften-Pfad als Präfix.** „Die Frist beträgt 14 Tage" ist ohne
+  „Kündigung > Fristen" nicht auffindbar und im Prompt nicht einordbar. Der
+  Pfad wird Teil des embeddeten Textes, bleibt aber aus dem gespeicherten
+  Chunk-Text heraus.
+- **Sektionsgrenzen sind hart.** Overlap zwischen zwei Abschnitten verbindet
+  Themen, die nichts miteinander zu tun haben. Überlappt wird nur innerhalb
+  einer Sektion, und der Overlap geht vom Chunk-Budget ab statt dazu — sonst
+  überschreiten die Chunks das Ziel genau um seine Länge.
+- **Tabellen behalten ihren Kopf.** Wird eine große Tabelle geteilt, bekommt
+  jeder Teil die Kopfzeile erneut. „4.500 | 12 | ja" beantwortet ohne
+  Spaltennamen keine Frage.
+
+Die Satzsegmentierung kennt deutsche Abkürzungen — ohne sie zerschneidet
+`gemäß § 5 Abs. 2 Satz 1` mitten in der Fundstelle. Umgekehrt bleibt sie bei
+Ordinalzahlen bewusst konservativ: „1. Januar" und „Satz 1. Danach" sind ohne
+Semantik nicht zu unterscheiden, und ein verpasster Schnitt kostet nur
+Granularität, ein falscher zerreißt eine Fundstelle.
+
+Gezählt wird mit dem Tokenizer des Embedding-Modells, nicht geschätzt — sonst
+schneidet das Modell Chunks ab, die der Chunker für passend hielt. Ohne
+geladenes Modell greift eine Zeichenheuristik (3,2 Zeichen pro Token; deutsche
+Komposita kosten mehr Subtokens als englischer Text).
+
+Zielgröße 512 Token bei 64 Token Overlap. bge-m3 verkraftet 8192, aber das ist
+die falsche Obergrenze: je mehr Themen in einem Vektor landen, desto unschärfer
+wird er.
+
+## Index
+
+SQLite plus [sqlite-vec](https://github.com/asg017/sqlite-vec), eine Datei,
+kein Server. Cosine-Distanz, weil bge-m3 normalisierte Vektoren liefert.
+
+Zwei Eigenschaften, die beide gegen einen *stillen* Fehler existieren:
+
+- **Der Index kennt sein Embedding-Modell.** Vektoren aus zwei Modellen im
+  selben Raum liefern weiter Treffer, nur falsche. Modell, Dimension und
+  Schema-Version stehen in `meta` und werden bei jedem Öffnen geprüft; ein
+  Wechsel bricht mit Hinweis ab, statt schlechtere Ergebnisse zu liefern.
+- **Vektoren werden explizit mitgelöscht.** Die `vec0`-Tabelle hängt nicht am
+  `ON DELETE CASCADE` der Chunks. Ohne den eigenen Löschschritt bleiben
+  verwaiste Vektoren zurück, die auf nicht mehr existierende Chunks zeigen.
+
+Ingest ist idempotent über den SHA-256 des Dateiinhalts, nicht über die mtime:
+Kopieren und Auspacken setzen die mtime neu, ohne dass sich etwas geändert hat.
+Ein zweiter Lauf über ein gepflegtes Verzeichnis kostet nur das Hashen. Eine
+kaputte Datei beendet den Lauf nicht — bei hundert Dateien ist eine kaputte die
+Regel, und ein Abbruch bei Datei 80 verschenkt die Extraktionszeit der ersten
+79.
+
+Beim Ingest darf der Embedder die GPU nehmen, auch wenn `platforms.toml` ihn
+für die Query-Phase auf die CPU legt: dort teilt er sich das VRAM mit dem
+Generator, hier ist keiner geladen. `--device` überschreibt.
+
+Gemessen auf dieser Maschine (12 Kerne, CPU, bge-m3):
+
+| | |
+|---|---|
+| Modell laden | 7,5 s, einmalig pro Lauf |
+| Embedding | 1,2 Chunks/s bei ~500 Token pro Chunk |
+| Query-Embedding | 79 ms |
+| zweiter Lauf, nichts geändert | 1,1 s für drei Dateien, Modell wird nicht geladen |
+
+Das Modell wird erst beim ersten zu verarbeitenden Dokument geladen. Ein Lauf
+über ein unverändertes Verzeichnis zahlt die 7,5 Sekunden deshalb nicht.
+
+Hochgerechnet auf 1000 Seiten ohne Scans: ~13 Minuten Extraktion plus ~18
+Minuten Embedding. Das Embedding ist damit die teurere Hälfte des Ingests —
+auf einem Rechner mit sichtbarer GPU der erste Hebel.
+
 ## Tests
 
 ```bash
 uv pip install -e ".[dev]" && pytest -q
 ```
 
-Getestet wird die Entscheidungslogik, ohne whichllm-Aufruf und ohne Netz.
+Getestet wird die Entscheidungslogik: ohne whichllm-Aufruf, ohne Netz und ohne
+Modell-Download. Der Embedder wird in den Ingest-Tests durch einen Stub
+ersetzt, der aus dem Text deterministische Vektoren ableitet — geprüft wird die
+Steuerung (Dateiauswahl, Idempotenz, Fehlerbehandlung), nicht die
+Retrieval-Qualität.
 
 ## Nächste Schritte
 
-2. **Ingest** (angefangen): Extraktion steht, fehlen Chunking → bge-m3 → sqlite-vec
-3. Query: Retrieval → Rerank → Prompt → llama-cpp-python
-4. Messen: Latenz pro Stufe, Ingest-Durchsatz
+3. Query: Reranking (bge-reranker-v2-m3) → Prompt → llama-cpp-python
+4. Messen: Latenz pro Stufe, Ingest-Durchsatz, Retrieval-Qualität an echten
+   deutschen Dokumenten
 5. whichllm erweitern: Rollen, MTEB-Adapter, Budget-Allokation
 
-Offen: Phasen-getrenntes VRAM-Budget (Ingest lädt keinen Generator, Query kein
-OCR). Auf dieser Maschine ohne Wirkung, weil Torch die AMD-iGPU nicht sieht —
-relevant erst mit einem NVIDIA-Zielrechner.
+Offen:
+
+- **Seitenzahlen pro Chunk.** Docling kennt die Provenance jedes Elements,
+  `export_to_markdown()` verliert sie. Für Quellenangaben („Seite 12") müsste
+  die Extraktion strukturiert statt als Markdown durchgereicht werden.
+- **Hybrid-Retrieval.** bge-m3 liefert neben dem Dense-Vektor auch
+  Sparse-Gewichte; genutzt wird bisher nur der Dense-Teil. Bei Aktenzeichen und
+  Eigennamen wäre die lexikalische Komponente der größere Hebel — es war das
+  ausschlaggebende Argument für dieses Modell.
+- **Empirischer Embedder-Vergleich.** `[embedder.qwen3]` steht als Profil
+  bereit. Ein Wechsel invalidiert den Index (bewusst: der Store lehnt ihn ab).
+- **Phasen-getrenntes VRAM-Budget** (Ingest lädt keinen Generator, Query kein
+  OCR). Für den Embedder beim Ingest ist das umgesetzt — er nimmt die GPU,
+  wenn Torch eine sieht. Auf dieser Maschine ohne Wirkung, weil Torch die
+  AMD-iGPU nicht sieht; relevant erst mit einem NVIDIA-Zielrechner.

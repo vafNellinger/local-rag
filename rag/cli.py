@@ -1,4 +1,4 @@
-"""CLI. In Schritt 1 nur die Plattform- und Modellauflösung."""
+"""CLI: Planung, Extraktion, Ingest und Suche."""
 
 from __future__ import annotations
 
@@ -11,8 +11,11 @@ from rich.table import Table
 from pathlib import Path
 
 from rag.detect import Platform, WhichllmError, detect_local, simulate
+from rag.embed import Embedder, EmbeddingError, load_embedder_config
 from rag.extract import ExtractionError, convert, probe
+from rag.ingest import IngestReport, ingest_paths, search_index
 from rag.resolve import PipelinePlan, ResolutionError, resolve_pipeline
+from rag.store import DEFAULT_INDEX_NAME, IndexStore, StoreError
 
 app = typer.Typer(
     add_completion=False,
@@ -21,6 +24,10 @@ app = typer.Typer(
 console = Console()
 
 _GIB = 1024**3
+
+# Wo der Index liegt, wenn nichts anderes gesagt wird. Neben dem Cache, weil
+# er wie der Cache aus den Quelldokumenten neu erzeugbar ist.
+DEFAULT_INDEX_PATH = Path.home() / ".cache" / "local-rag" / DEFAULT_INDEX_NAME
 
 
 @app.callback()
@@ -260,6 +267,240 @@ def convert_cmd(
     if show:
         console.print()
         console.print(doc.markdown[:show])
+    console.print()
+
+
+def _open_store(
+    index: Path, profile: str, *, device: str = "auto"
+) -> tuple[IndexStore, Embedder]:
+    """Index und Embedder passend zueinander öffnen.
+
+    Beide aus derselben Konfiguration, damit Modell und Index nicht
+    auseinanderlaufen können. Der Embedder wird zuerst gebaut: schlägt die
+    Konfiguration fehl, bleibt kein offener Index zurück.
+    """
+    config = load_embedder_config(profile)
+    embedder = Embedder(config, device=device)
+    store = IndexStore(
+        index, embedder=config.model_id, dimensions=config.dimensions
+    ).open()
+    return store, embedder
+
+
+def _render_ingest(report: IngestReport) -> None:
+    table = Table(show_lines=False)
+    table.add_column("Datei", overflow="fold")
+    table.add_column("Status")
+    table.add_column("Chunks", justify="right")
+    table.add_column("Dauer", justify="right")
+
+    styles = {
+        "neu": "green",
+        "aktualisiert": "cyan",
+        "unverändert": "dim",
+        "leer": "yellow",
+        "fehler": "red",
+    }
+
+    for result in report.results:
+        style = styles.get(result.status, "")
+        ocr = " [yellow]OCR[/]" if result.ocr_used else ""
+        table.add_row(
+            result.path.name,
+            f"[{style}]{result.status}[/]{ocr}" if style else result.status,
+            str(result.chunk_count) if result.chunk_count else "—",
+            f"{result.duration_seconds:.1f}s" if result.duration_seconds else "—",
+        )
+        if result.error:
+            table.add_row("", f"[red]{result.error}[/]", "", "")
+        for warning in result.warnings:
+            table.add_row("", f"[yellow]{warning}[/]", "", "")
+
+    console.print()
+    console.print(table)
+
+    changed = len(report.changed)
+    console.print(
+        f"\n  {changed} Datei(en) verarbeitet, {len(report.skipped)} unverändert, "
+        f"{report.chunk_count} Chunks im Index, {report.duration_seconds:.1f}s"
+    )
+    if report.ocr_count:
+        console.print(f"  [yellow]{report.ocr_count} Datei(en) mit OCR[/]")
+    if report.removed:
+        console.print(
+            f"  [dim]{len(report.removed)} verschwundene Datei(en) entfernt[/]"
+        )
+    if report.failed:
+        console.print(f"  [red]{len(report.failed)} Datei(en) fehlgeschlagen[/]")
+    console.print()
+
+
+@app.command()
+def ingest(
+    paths: list[Path] = typer.Argument(..., help="Dateien oder Verzeichnisse"),
+    index: Path = typer.Option(DEFAULT_INDEX_PATH, "--index", help="Index-Datei"),
+    profile: str = typer.Option(
+        "default", "--profile", help="Embedder-Profil aus platforms.toml"
+    ),
+    device: str = typer.Option(
+        "auto", "--device", help="auto, cpu, cuda oder mps"
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Auch unveränderte Dateien neu einlesen"
+    ),
+    prune: bool = typer.Option(
+        False, "--prune", help="Verschwundene Dateien aus dem Index entfernen"
+    ),
+    ocr: bool | None = typer.Option(
+        None, "--ocr/--no-ocr", help="OCR erzwingen oder unterdrücken"
+    ),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Debug-Ausgabe"),
+) -> None:
+    """Dokumente extrahieren, chunken, embedden und indizieren."""
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+
+    try:
+        store, embedder = _open_store(index, profile, device=device)
+    except (StoreError, EmbeddingError) as exc:
+        console.print(f"[red]Fehler:[/] {exc}")
+        raise typer.Exit(1) from exc
+
+    console.print(
+        f"[dim]Index:[/] {index}\n"
+        f"[dim]Embedder:[/] {embedder.config.model_id} auf {embedder.device}"
+    )
+
+    # Der erste Lauf lädt das Modell — ohne Hinweis sieht die Pause wie ein
+    # Hänger aus.
+    with console.status("[dim]verarbeite…[/]") as status:
+
+        def on_progress(path: Path, position: int, total: int, phase: str) -> None:
+            status.update(f"[dim]{position}/{total} {path.name} — {phase}[/]")
+
+        try:
+            report = ingest_paths(
+                paths,
+                store=store,
+                embedder=embedder,
+                force=force,
+                prune=prune,
+                ocr=ocr,
+                progress=on_progress,
+            )
+        except (StoreError, EmbeddingError) as exc:
+            console.print(f"[red]Fehler:[/] {exc}")
+            raise typer.Exit(1) from exc
+        finally:
+            store.close()
+
+    _render_ingest(report)
+
+    if report.failed:
+        raise typer.Exit(1)
+
+
+@app.command()
+def search(
+    query: str = typer.Argument(..., help="Suchbegriff oder Frage"),
+    index: Path = typer.Option(DEFAULT_INDEX_PATH, "--index", help="Index-Datei"),
+    profile: str = typer.Option(
+        "default", "--profile", help="Embedder-Profil aus platforms.toml"
+    ),
+    limit: int = typer.Option(5, "-n", "--limit", help="Zahl der Treffer"),
+    full: bool = typer.Option(False, "--full", help="Chunks vollständig zeigen"),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Debug-Ausgabe"),
+) -> None:
+    """Suche im Index. Reine Vektorsuche, ohne Reranking und Generierung."""
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+
+    if not index.exists():
+        console.print(f"[red]Fehler:[/] kein Index unter {index} — erst 'rag ingest'")
+        raise typer.Exit(1)
+
+    try:
+        store, embedder = _open_store(index, profile)
+    except (StoreError, EmbeddingError) as exc:
+        console.print(f"[red]Fehler:[/] {exc}")
+        raise typer.Exit(1) from exc
+
+    try:
+        with console.status("[dim]suche…[/]"):
+            hits = search_index(query, store=store, embedder=embedder, limit=limit)
+    except (StoreError, EmbeddingError) as exc:
+        console.print(f"[red]Fehler:[/] {exc}")
+        raise typer.Exit(1) from exc
+    finally:
+        store.close()
+
+    if not hits:
+        console.print("\n  [yellow]keine Treffer[/]\n")
+        return
+
+    console.print()
+    for rank, hit in enumerate(hits, start=1):
+        console.print(
+            f"[bold]{rank}.[/] [cyan]{hit.citation}[/] "
+            f"[dim]({hit.similarity:.3f})[/]"
+        )
+        text = hit.text if full else hit.text[:400].replace("\n", " ")
+        suffix = "" if full or len(hit.text) <= 400 else " […]"
+        console.print(f"   {text}{suffix}")
+        console.print()
+
+
+@app.command()
+def status(
+    index: Path = typer.Option(DEFAULT_INDEX_PATH, "--index", help="Index-Datei"),
+    profile: str = typer.Option(
+        "default", "--profile", help="Embedder-Profil aus platforms.toml"
+    ),
+) -> None:
+    """Zeige, was im Index liegt."""
+    if not index.exists():
+        console.print(f"\n  [yellow]kein Index unter[/] {index}\n")
+        return
+
+    try:
+        store, _ = _open_store(index, profile)
+    except (StoreError, EmbeddingError) as exc:
+        console.print(f"[red]Fehler:[/] {exc}")
+        raise typer.Exit(1) from exc
+
+    try:
+        stats = store.stats()
+        documents = store.documents()
+    finally:
+        store.close()
+
+    size_mb = index.stat().st_size / (1024 * 1024)
+    console.print()
+    console.print(f"[bold]{stats['path']}[/] — {size_mb:.1f} MB")
+    # Tausendertrennung nur auf der Zahl: auf dem ganzen Satz würden auch die
+    # Kommas zwischen den Feldern zu Punkten.
+    tokens = f"{stats['tokens']:,}".replace(",", ".")
+    console.print(
+        f"  {stats['documents']} Dokumente, {stats['chunks']} Chunks, "
+        f"{tokens} Token"
+    )
+    console.print(
+        f"  Embedder: [cyan]{stats['embedder']}[/] "
+        f"({stats['dimensions']} Dimensionen)"
+    )
+
+    if documents:
+        table = Table(show_lines=False)
+        table.add_column("Dokument", overflow="fold")
+        table.add_column("Chunks", justify="right")
+        for record in documents:
+            table.add_row(Path(record.path).name, str(record.chunk_count))
+        console.print()
+        console.print(table)
     console.print()
 
 

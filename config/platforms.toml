@@ -22,8 +22,20 @@ static = ["embedder", "reranker"]
 # englischlastiger Embedder ruiniert das Retrieval, bevor der Generator
 # überhaupt zum Einsatz kommt.
 #
-# TODO(Schritt 2): gegen aktuelle MTEB-Zahlen prüfen, bevor festgeschrieben.
-# Diese Auswahl ist ein begründeter Startpunkt, keine gemessene Wahrheit.
+# Gegen die MTEB-Zahlen von Juli 2026 geprüft. Ergebnis: bge-m3 bleibt.
+#
+# Die aggregierten Leaderboards führen inzwischen Qwen3-Embedding-8B (~75) und
+# KaLM-Embedding-Gemma3-12B (72,3) an — beide sind für dieses Projekt
+# unbrauchbar, weil sie neben dem Generator kein VRAM-Budget haben. In der
+# vergleichbaren Größenklasse steht Qwen3-Embedding-0.6B (64,3 multilingual)
+# gegen bge-m3 (~63,0). Die Zahlen stammen aus verschiedenen MTEB-Versionen
+# und sind nicht sauber vergleichbar; der Vorsprung ist real, aber klein.
+#
+# Ausschlaggebend war nicht der Mittelwert, sondern dass bge-m3 dense, sparse
+# und multi-vector in einem Modell liefert. Die Sparse-Vektoren erlauben
+# später Hybrid-Retrieval ohne zweites Modell — bei deutschen Fachbegriffen,
+# Aktenzeichen und Eigennamen bringt die lexikalische Komponente mehr als ein
+# Punkt MTEB-Mittelwert. Dazu passt der Reranker aus derselben Familie.
 
 [embedder.default]
 model_id = "BAAI/bge-m3"
@@ -31,12 +43,36 @@ dimensions = 1024
 max_seq_length = 8192
 # Grober Resident-Bedarf in FP16, für die Budgetrechnung in resolve.py.
 vram_estimate_mb = 1100
+# bge-m3 braucht keine Instruktionspräfixe — Anfrage und Dokument gehen
+# unverändert ins Modell. Bei den Alternativen unten ist das anders, deshalb
+# steht es als Feld hier und nicht als Annahme im Code.
+query_prefix = ""
+passage_prefix = ""
 
+# E5-Modelle sind auf genau diese Präfixe trainiert. Fehlen sie, sinkt die
+# Retrieval-Qualität deutlich, ohne dass irgendetwas fehlschlägt — der
+# gefährlichste Fall beim Umschalten. Beachte auch die 512 Token: das ist
+# weniger als die Chunk-Zielgröße mal Sicherheitsfaktor, längere Chunks
+# würden still abgeschnitten.
 [embedder.alternative]
 model_id = "intfloat/multilingual-e5-large"
 dimensions = 1024
 max_seq_length = 512
 vram_estimate_mb = 1100
+query_prefix = "query: "
+passage_prefix = "passage: "
+
+# Neuerer Kandidat, für den späteren empirischen Vergleich an echten
+# deutschen Dokumenten. Kann per MRL auf kleinere Dimensionen gekürzt werden;
+# die Query-Instruktion kostet laut Modellkarte 1-5 % Retrieval-Qualität,
+# wenn sie fehlt.
+[embedder.qwen3]
+model_id = "Qwen/Qwen3-Embedding-0.6B"
+dimensions = 1024
+max_seq_length = 32768
+vram_estimate_mb = 1300
+query_prefix = "Instruct: Given a search query, retrieve relevant passages that answer it\nQuery: "
+passage_prefix = ""
 
 
 # ─── Reranker ────────────────────────────────────────────────────────────────
