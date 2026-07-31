@@ -37,6 +37,11 @@ gui = [
 dev = [
     "pytest>=8.0",
 ]
+# Nur für tools/testkorpus.py: erzeugt die PDFs des Testkorpus mit Textlayer.
+# Die gescannte Variante entsteht über pillow, das schon in [ingest] steht.
+testdaten = [
+    "reportlab>=4.0",
+]
 
 [project.scripts]
 rag = "rag.cli:app"

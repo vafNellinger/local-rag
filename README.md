@@ -357,6 +357,127 @@ ersetzt, der aus dem Text deterministische Vektoren ableitet — geprüft wird d
 Steuerung (Dateiauswahl, Idempotenz, Fehlerbehandlung), nicht die
 Retrieval-Qualität.
 
+## Testkorpus und Messung
+
+```bash
+python tools/testkorpus.py testdaten/korpus   # 24 Dokumente erzeugen
+rag ingest testdaten/korpus --index eval.db
+rag eval --index eval.db                      # gegen testdaten/goldstandard.json
+rag eval --index eval.db --no-rerank          # zum Vergleich
+rag eval --index eval.db --answers            # auch Antworten prüfen (langsam)
+```
+
+Der Korpus wird erzeugt statt eingecheckt: so bleiben DOCX und PDF aus dem
+Repo, und die Definition ist lesbarer Python. Der Goldstandard mit 66 Fragen
+liegt dagegen in `testdaten/goldstandard.json` — er ist die eigentliche
+Arbeit.
+
+**Der Korpus ist auf Kollisionen gebaut.** „Kündigungsfrist" steht in vier
+Dokumenten mit vier verschiedenen Fristen, „Schadenmeldung" in drei,
+„Löschfrist" in drei. Jede Zahl im Korpus ist eindeutig — damit lässt sich an
+der Antwort ablesen, welche Quelle das Modell wirklich benutzt hat. Fünf
+Formate, eines davon ein PDF ohne Textlayer, das nur über OCR erreichbar ist.
+
+**Die Fragen sind bewusst in anderem Wortschatz formuliert als die
+Dokumente.** Wer Frage und Dokument mit denselben Wörtern schreibt, misst
+Stringvergleich statt Retrieval: das Dokument sagt „Kennwort", die Frage fragt
+nach dem „Passwort"; das Dokument sagt „Nutzungsprotokolle", die Frage nach
+„Log-Dateien". Dazu sechs Fragen, deren Antwort **nicht** im Korpus steht,
+teils mit Distraktoren — die Frage nach dem Zuschuss zur Altersvorsorge trifft
+ein Dokument, das „betriebliche Altersversorgung" erwähnt, aber nur deren
+Aufbewahrungsdauer.
+
+Ehrlich zur Grenze: Dokumente *und* Fragen stammen von derselben Quelle, und
+das setzt eine Obergrenze für die Aussagekraft. Echte Nutzerfragen sind
+schiefer als selbst gebaute.
+
+### Ergebnis
+
+66 Fragen, 88 Chunks aus 24 Dokumenten:
+
+| | mit Reranking | ohne Reranking |
+|---|---|---|
+| Recall@1 | 91,7 % | 85,0 % |
+| Recall@3 | 100 % | 98,3 % |
+| Recall@5 | 100 % | 98,3 % |
+| MRR | 0,956 | 0,914 |
+| Dauer für 66 Fragen | 428,7 s | 15,1 s |
+
+**Reranking kostet auf CPU das 28-Fache und bringt bei Recall@5 eine einzige
+Frage von sechzig.** Der Gewinn liegt bei Recall@1 (+6,7 Punkte) und damit in
+der Reihenfolge, nicht in der Trefferabdeckung. Wer das Kontextbudget nicht
+ausschöpft, kann es abschalten. Diese Zahl gilt für 88 Chunks — bei einem
+großen Korpus mit vielen ähnlichen Stellen verschiebt sich das Bild zugunsten
+des Rerankers, das ist hier nicht gemessen.
+
+### Was die Schwelle wirklich tut
+
+Meine frühere Empfehlung `min_rerank_score = 0.01` war zu optimistisch, und
+die Messung zeigt warum:
+
+| Schwelle | Recall | Präzision | Rauschen bleibt |
+|---|---|---|---|
+| 0 | 100 % | 35,7 % | 30 Chunks |
+| 0,001 | 95,0 % | 48,0 % | 14 |
+| 0,01 | 91,7 % | 73,3 % | 7 |
+| 0,03 | 90,0 % | 83,3 % | 6 |
+| 0,5 | 90,0 % | 90,5 % | 6 |
+
+Richtige Treffer erreichen Punktwerte von **0,0001 bis 0,9933**, Rauschen von
+**0,0018 bis 0,7182** — die Bereiche überlappen fast vollständig. **Es gibt
+keine Schwelle, die sauber trennt.** Jeder Prozentpunkt Präzision kostet
+Recall. Die Vorgabe bleibt deshalb 0; wer filtert, tauscht bewusst.
+
+Der Grund für die Überlappung ist erkennbar: der Cross-Encoder vergibt bei
+umgangssprachlichen Fragen durchweg niedrige Werte, auch wenn er richtig
+sortiert. `haus-mittagsruhe` findet die richtige Stelle auf Platz 1 — mit
+0,00046. Die Rangfolge ist brauchbar, der Absolutwert nicht.
+
+### Antwortqualität
+
+An 18 Fragen geprüft (die sechs unbeantwortbaren plus zwölf quer durch die
+Domänen), weil jede Antwort rund zwanzig Sekunden kostet:
+
+- **Nichtwissen: 6 von 6 korrekt eingeräumt.** Auch bei der Frage nach dem
+  gesetzlichen Mindestlohn, die das Modell aus eigenem Wissen beantworten
+  könnte — es tat es nicht. Das ist die Eigenschaft, an der ein RAG-System
+  hängt, und sie hält.
+- **Erwartete Angabe in der Antwort: 9 von 11.** Zwei Fehlschläge, beide
+  dieselbe Ursache: das Modell räumte Nichtwissen ein, obwohl die Antwort im
+  Korpus stand. Bei `haus-mittagsruhe` lag der richtige Chunk sogar auf Platz 1
+  — es ist der Sammelchunk aus `hausordnung.txt`, in dem die Ruhezeiten
+  zwischen Treppenhausreinigung und Fahrradkeller stehen. Das Modell zitierte
+  die Zeiten und verneinte trotzdem.
+
+Falsche Angaben gab es keine. Das System irrt in Richtung Schweigen, nicht in
+Richtung Erfindung — die richtige Richtung, wenn man sich entscheiden muss.
+
+### Was die Messung an Fehlern gefunden hat
+
+Zwei davon in den Testdaten selbst, beide korrigiert und im Goldstandard
+vermerkt: eine H3 „Kündigungsfristen" hing unter der H2 „Miete und
+Nebenkosten", wodurch der Überschriften-Präfix des Chunks in die Irre führte
+und die Frist auf Rang 2 fiel. Und die Frage „Wie werden die Daten auf der
+Platte gesichert?" traf zu Recht das Backup-Konzept statt der Verschlüsselung
+— die Frage war mehrdeutig, nicht das Retrieval.
+
+Einen in der Messung selbst: die erste Fassung prüfte nur, ob die erwartete
+Zeichenkette in der Antwort vorkommt. Damit galt „Die Frage ist in den Quellen
+nicht enthalten. [1] nennt Ruhezeiten von 13:00 bis 15:00 Uhr" als richtige
+Antwort auf die Frage nach der Mittagsruhe. `answered_correctly` verlangt jetzt
+zusätzlich, dass kein Nichtwissen eingeräumt wurde — wer nicht antwortet, hat
+nicht geantwortet, auch wenn er dabei zitiert.
+
+Einen im System, offen: **reiner Text wird zu einem einzigen Chunk.**
+`hausordnung.txt` enthält Ruhezeiten, Treppenhausreinigung, Müllabfuhr und
+Fahrradkeller — und landet als ein Vektor im Index, weil `_parse_blocks` ohne
+Markdown-Überschriften keine Struktur erkennt und der Text unter der
+Chunk-Zielgröße bleibt. Der Sammelvektor ist verwaschen: die Frage nach dem
+Abholrhythmus des Altpapiers landet auf Rang 3, hinter dem Backup-Konzept, das
+„Sicherungsrhythmus" wörtlich enthält. Eine Heuristik für Überschriften in
+reinem Text (kurze Zeile ohne Satzzeichen, gefolgt von Leerzeile und Absatz)
+würde das beheben.
+
 ## Gemessen
 
 Alles auf dieser Maschine (24 logische Kerne, CPU; Torch sieht die AMD-iGPU
@@ -384,11 +505,23 @@ gegen die gemessenen 2,4 auf CPU.
 
 ## Nächste Schritte
 
-4. Messen an einem echten Korpus statt an drei Testdokumenten: Retrieval-Güte,
-   sinnvolle Relevanzschwelle, Ingest-Durchsatz über hunderte Seiten
 5. whichllm erweitern: Rollen, MTEB-Adapter, Budget-Allokation
 
 Offen:
+
+- **Überschriften in reinem Text erkennen.** Der oben beschriebene Befund:
+  `.txt`-Dateien werden zu einem Sammelchunk, dessen Vektor verwaschen ist. Eine
+  Heuristik (kurze Zeile ohne Satzzeichen, gefolgt von Leerzeile und Absatz)
+  würde die Struktur wiederherstellen. Nachweisbar an `haus-papier` und
+  `haus-mittagsruhe`, die beide daran hängen.
+- **Reranking auf CPU überdenken.** Gemessen kostet es das 28-Fache und bringt
+  bei Recall@5 eine Frage von sechzig. Für `igpu_shared` — wo der Reranker
+  ohnehin auf der CPU liegt — wäre `reranker_enabled = false` die belegtere
+  Vorgabe. Vor der Änderung sollte das an einem größeren Korpus gegengeprüft
+  werden, weil der Nutzen mit der Zahl ähnlicher Stellen steigt.
+- **Messung an echten Dokumenten.** Der Testkorpus ist selbst erfunden;
+  Dokumente und Fragen stammen aus derselben Feder. Das begrenzt die
+  Aussagekraft nach oben, egal wie sorgfältig die Fragen formuliert sind.
 
 - **GPU-Betrieb.** Weder Torch noch llama.cpp sehen hier eine GPU: Torch ist
   der CUDA-Build (die Radeon 890M bleibt unsichtbar, dafür bräuchte es ROCm),

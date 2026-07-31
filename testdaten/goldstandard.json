@@ -1,0 +1,532 @@
+{
+  "hinweis": "Fragen zum Korpus aus tools/testkorpus.py. Bewusst in anderem Wortschatz als die Dokumente formuliert: wer Dokument und Frage mit denselben Wörtern schreibt, misst Stringvergleich statt Retrieval. 'dokumente' nennt alle Quellen, die die Frage belegen können; bei 'typ': 'ohne_antwort' muss das System Nichtwissen einräumen.",
+  "fragen": [
+    {
+      "id": "miete-gewerbe-kuendigung",
+      "frage": "Ich möchte die Werkstatt aufgeben. Wie viel Vorlauf brauche ich?",
+      "dokumente": ["mietvertrag-gewerbe"],
+      "abschnitt": "Kündigungsfristen",
+      "antwort_enthaelt": ["sechs Monate"],
+      "typ": "eindeutig",
+      "notiz": "Frage sagt 'Vorlauf', Dokument sagt 'Kündigungsfrist'"
+    },
+    {
+      "id": "miete-wohnung-kuendigung",
+      "frage": "Ab wann muss ich Bescheid geben, wenn ich aus der Wohnung ausziehen will?",
+      "dokumente": ["mietvertrag-wohnung"],
+      "abschnitt": "Beendigung des Mietverhältnisses",
+      "antwort_enthaelt": ["drei Monate"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "miete-gewerbe-reparatur",
+      "frage": "Wer bezahlt kleine Ausbesserungen im Ladenlokal?",
+      "dokumente": ["mietvertrag-gewerbe"],
+      "abschnitt": "Instandhaltung",
+      "antwort_enthaelt": ["150"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "miete-gewerbe-unter",
+      "frage": "Darf ich die Räume an jemand anderen weitergeben?",
+      "dokumente": ["mietvertrag-gewerbe"],
+      "abschnitt": "Untervermietung",
+      "antwort_enthaelt": ["Zustimmung"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "miete-wohnung-kaution",
+      "frage": "Wie viel Sicherheit muss ich für die Wohnung hinterlegen?",
+      "dokumente": ["mietvertrag-wohnung"],
+      "abschnitt": "Kaution",
+      "antwort_enthaelt": ["2.280"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "miete-wohnung-hund",
+      "frage": "Kann ich einen Hund mitbringen?",
+      "dokumente": ["mietvertrag-wohnung"],
+      "abschnitt": "Tierhaltung",
+      "antwort_enthaelt": ["Erlaubnis"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "miete-nebenkosten-umlage",
+      "frage": "Welche der monatlichen Posten darf auf die Mietpartei abgewälzt werden?",
+      "dokumente": ["mietvertrag-gewerbe"],
+      "abschnitt": "Miete und Nebenkosten",
+      "antwort_enthaelt": ["Heizung"],
+      "typ": "eindeutig",
+      "notiz": "Antwort steht in einer Tabelle"
+    },
+    {
+      "id": "arbeit-probezeit-frist",
+      "frage": "Wie schnell kann man mich in den ersten Wochen wieder loswerden?",
+      "dokumente": ["arbeitsvertrag"],
+      "abschnitt": "Probezeit",
+      "antwort_enthaelt": ["zwei Wochen"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "arbeit-probezeit-dauer",
+      "frage": "Wie lange bin ich auf Bewährung, bevor die Stelle sicher ist?",
+      "dokumente": ["arbeitsvertrag"],
+      "abschnitt": "Probezeit",
+      "antwort_enthaelt": ["sechs Monate"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "arbeit-gehalt",
+      "frage": "Was verdient man dort im Jahr?",
+      "dokumente": ["arbeitsvertrag"],
+      "abschnitt": "Vergütung",
+      "antwort_enthaelt": ["68.400"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "arbeit-stunden",
+      "frage": "Wie viele Stunden arbeitet man in der Woche?",
+      "dokumente": ["arbeitsvertrag"],
+      "abschnitt": "Arbeitszeit",
+      "antwort_enthaelt": ["38"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "arbeit-nebenjob",
+      "frage": "Darf ich abends noch woanders dazuverdienen?",
+      "dokumente": ["arbeitsvertrag"],
+      "abschnitt": "Nebentätigkeit",
+      "antwort_enthaelt": ["anzuzeigen"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "urlaub-tage",
+      "frage": "Wie viele freie Tage im Jahr stehen mir zu?",
+      "dokumente": ["betriebsvereinbarung-urlaub"],
+      "abschnitt": "Urlaubsanspruch",
+      "antwort_enthaelt": ["30"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "urlaub-vorlauf",
+      "frage": "Wie früh muss ich freie Tage anmelden?",
+      "dokumente": ["betriebsvereinbarung-urlaub"],
+      "abschnitt": "Antragsverfahren",
+      "antwort_enthaelt": ["vier Wochen"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "urlaub-verfall",
+      "frage": "Bis wann muss ich Resttage aus dem Vorjahr verbraucht haben?",
+      "dokumente": ["betriebsvereinbarung-urlaub"],
+      "abschnitt": "Urlaubsanspruch",
+      "antwort_enthaelt": ["31. März"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "urlaub-hochzeit",
+      "frage": "Bekomme ich für meine eigene Trauung frei?",
+      "dokumente": ["betriebsvereinbarung-urlaub"],
+      "abschnitt": "Sonderurlaub",
+      "antwort_enthaelt": ["zwei Tage"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "homeoffice-tage",
+      "frage": "An wie vielen Tagen darf ich von daheim arbeiten?",
+      "dokumente": ["homeoffice-regelung"],
+      "abschnitt": "Umfang",
+      "antwort_enthaelt": ["drei"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "homeoffice-zuschuss",
+      "frage": "Gibt es Geld für die Einrichtung am Küchentisch?",
+      "dokumente": ["homeoffice-regelung"],
+      "abschnitt": "Ausstattung",
+      "antwort_enthaelt": ["450"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "homeoffice-ankuendigung",
+      "frage": "Wie kurzfristig kann ich entscheiden, nicht ins Büro zu kommen?",
+      "dokumente": ["homeoffice-regelung"],
+      "abschnitt": "Ankündigung",
+      "antwort_enthaelt": ["drei Arbeitstage"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "weiterbildung-tage",
+      "frage": "Wie viele Tage darf ich für einen Kurs freinehmen?",
+      "dokumente": ["weiterbildung"],
+      "abschnitt": "Bildungsurlaub",
+      "antwort_enthaelt": ["fünf"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "weiterbildung-kosten",
+      "frage": "Bis zu welcher Höhe zahlt die Firma Kurse im Jahr?",
+      "dokumente": ["weiterbildung"],
+      "abschnitt": "Kostenübernahme",
+      "antwort_enthaelt": ["2.400"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "datenschutz-logs",
+      "frage": "Wie lange bleiben Log-Dateien der Nutzer liegen?",
+      "dokumente": ["datenschutzkonzept"],
+      "abschnitt": "Löschfristen",
+      "antwort_enthaelt": ["90 Tage"],
+      "typ": "eindeutig",
+      "notiz": "Frage sagt 'Log-Dateien', Dokument sagt 'Nutzungsprotokolle'"
+    },
+    {
+      "id": "datenschutz-verschluesselung",
+      "frage": "Mit welchem Verfahren sind die Datenbankinhalte verschlüsselt?",
+      "dokumente": ["datenschutzkonzept"],
+      "abschnitt": "Technische Maßnahmen",
+      "antwort_enthaelt": ["AES-256"],
+      "typ": "eindeutig",
+      "notiz": "Erste Fassung lautete 'Wie werden die Daten auf der Platte gesichert?' — das war mehrdeutig und traf zu Recht das Backup-Konzept. Die Frage war schlecht, nicht das Retrieval."
+    },
+    {
+      "id": "loeschen-bewerbung",
+      "frage": "Wie lange behalten die meine Unterlagen, wenn ich eine Absage bekomme?",
+      "dokumente": ["loeschkonzept-personal"],
+      "abschnitt": "Bewerbungsunterlagen",
+      "antwort_enthaelt": ["sechs Monate"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "loeschen-abmahnung",
+      "frage": "Wann verschwindet eine Rüge wieder aus meiner Akte?",
+      "dokumente": ["loeschkonzept-personal"],
+      "abschnitt": "Abmahnungen",
+      "antwort_enthaelt": ["zwei Jahren"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "avv-datenleck",
+      "frage": "Wie schnell muss der Dienstleister ein Datenleck durchgeben?",
+      "dokumente": ["auftragsverarbeitung"],
+      "abschnitt": "Meldung von Datenschutzverletzungen",
+      "antwort_enthaelt": ["24 Stunden"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "avv-vertragsende",
+      "frage": "Was passiert mit den Daten beim Dienstleister, wenn wir aufhören?",
+      "dokumente": ["auftragsverarbeitung"],
+      "abschnitt": "Löschung nach Vertragsende",
+      "antwort_enthaelt": ["60 Tagen"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "haftpflicht-eigenanteil",
+      "frage": "Was muss die Firma bei einem Schadensfall aus eigener Tasche zahlen?",
+      "dokumente": ["betriebshaftpflicht"],
+      "abschnitt": "Selbstbeteiligung",
+      "antwort_enthaelt": ["500"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "haftpflicht-deckung",
+      "frage": "Bis zu welcher Summe ist der Betrieb abgesichert?",
+      "dokumente": ["betriebshaftpflicht"],
+      "abschnitt": "Versicherungsumfang",
+      "antwort_enthaelt": ["5 Millionen"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "gebaeude-wasserschaden",
+      "frage": "Wie schnell muss ich einen Rohrbruch im Haus durchgeben?",
+      "dokumente": ["gebaeudeversicherung"],
+      "abschnitt": "Anzeige eines Schadens",
+      "antwort_enthaelt": ["drei Werktagen"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "gebaeude-winter",
+      "frage": "Was muss ich im Winter mit leerstehenden Räumen tun?",
+      "dokumente": ["gebaeudeversicherung"],
+      "abschnitt": "Obliegenheiten im Winter",
+      "antwort_enthaelt": ["entleeren"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "reise-km",
+      "frage": "Was bekomme ich, wenn ich mit dem eigenen Wagen zum Kunden fahre?",
+      "dokumente": ["reisekostenrichtlinie"],
+      "abschnitt": "Fahrtkosten",
+      "antwort_enthaelt": ["0,30"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "reise-hotel",
+      "frage": "Wie teuer darf ein Hotel im Inland sein?",
+      "dokumente": ["reisekostenrichtlinie"],
+      "abschnitt": "Übernachtung",
+      "antwort_enthaelt": ["120"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "reise-abrechnung",
+      "frage": "Wie viel Zeit habe ich, die Auslagen einzureichen?",
+      "dokumente": ["reisekostenrichtlinie"],
+      "abschnitt": "Abrechnung",
+      "antwort_enthaelt": ["sechs Wochen"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "bewirtung-kunde",
+      "frage": "Wie viel darf ein Essen mit einem Geschäftspartner kosten?",
+      "dokumente": ["bewirtungsordnung"],
+      "abschnitt": "Bewirtung von Geschäftspartnern",
+      "antwort_enthaelt": ["85"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "bewirtung-geschenk",
+      "frage": "Was darf ein Präsent für einen Kunden kosten?",
+      "dokumente": ["bewirtungsordnung"],
+      "abschnitt": "Geschenke",
+      "antwort_enthaelt": ["50"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "einkauf-angebote",
+      "frage": "Ab welcher Summe brauche ich mehrere Vergleichsangebote?",
+      "dokumente": ["einkaufsrichtlinie"],
+      "abschnitt": "Genehmigungsgrenzen",
+      "antwort_enthaelt": ["25.000"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "einkauf-skonto",
+      "frage": "Welchen Abzug bekommen wir bei schneller Zahlung?",
+      "dokumente": ["einkaufsrichtlinie"],
+      "abschnitt": "Zahlungsbedingungen",
+      "antwort_enthaelt": ["2 Prozent"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "it-passwort",
+      "frage": "Wie oft muss ich mein Passwort erneuern?",
+      "dokumente": ["it-richtlinie"],
+      "abschnitt": "Kennwörter",
+      "antwort_enthaelt": ["90 Tage"],
+      "typ": "eindeutig",
+      "notiz": "Frage sagt 'Passwort', Dokument durchgehend 'Kennwort'"
+    },
+    {
+      "id": "it-virus",
+      "frage": "Wie schnell muss ich es melden, wenn mein Rechner sich seltsam verhält?",
+      "dokumente": ["it-richtlinie"],
+      "abschnitt": "Meldung von Sicherheitsvorfällen",
+      "antwort_enthaelt": ["einer Stunde"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "it-usb",
+      "frage": "Darf ich meinen privaten Stick am Arbeitsrechner benutzen?",
+      "dokumente": ["it-richtlinie"],
+      "abschnitt": "Umgang mit Datenträgern",
+      "antwort_enthaelt": ["untersagt"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "backup-ausfall",
+      "frage": "Wie lange darf ein System höchstens stillstehen?",
+      "dokumente": ["backup-konzept"],
+      "abschnitt": "Wiederherstellungsziele",
+      "antwort_enthaelt": ["vier Stunden"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "backup-probe",
+      "frage": "Wie oft wird ausprobiert, ob die Sicherung überhaupt zurückspielbar ist?",
+      "dokumente": ["backup-konzept"],
+      "abschnitt": "Wiederherstellungstest",
+      "antwort_enthaelt": ["quartalsweise"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "backup-aufbewahrung",
+      "frage": "Wie weit zurück komme ich bei den Tagessicherungen?",
+      "dokumente": ["backup-konzept"],
+      "abschnitt": "Aufbewahrung",
+      "antwort_enthaelt": ["30 Tage"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "server-luecke",
+      "frage": "Wie schnell werden gefährliche Sicherheitslücken geschlossen?",
+      "dokumente": ["serverwartung"],
+      "abschnitt": "Sicherheitsaktualisierungen",
+      "antwort_enthaelt": ["72 Stunden"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "server-fenster",
+      "frage": "Zu welcher Zeit sind die Systeme planmäßig nicht verfügbar?",
+      "dokumente": ["serverwartung"],
+      "abschnitt": "Wartungsfenster",
+      "antwort_enthaelt": ["Sonntag"],
+      "typ": "eindeutig",
+      "notiz": "Erste Fassung 'Wann wird an den Maschinen geschraubt, sodass nichts geht?' war zu vage und traf das Backup-Konzept."
+    },
+    {
+      "id": "qm-drehmoment",
+      "frage": "In welchem Abstand müssen Drehmomentschlüssel zum Prüfen?",
+      "dokumente": ["qualitaetshandbuch"],
+      "abschnitt": "Kalibrierintervalle",
+      "antwort_enthaelt": ["sechs Monate"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "qm-reklamation",
+      "frage": "Wie lange dauert es, bis eine Beschwerde beantwortet ist?",
+      "dokumente": ["qualitaetshandbuch"],
+      "abschnitt": "Reklamationen",
+      "antwort_enthaelt": ["15"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "verein-einladung",
+      "frage": "Wie lange vorher muss zur Versammlung eingeladen werden?",
+      "dokumente": ["vereinssatzung"],
+      "abschnitt": "Mitgliederversammlung",
+      "antwort_enthaelt": ["14 Tage"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "verein-beitrag",
+      "frage": "Was zahlt eine Familie im Jahr für die Mitgliedschaft?",
+      "dokumente": ["vereinssatzung"],
+      "abschnitt": "Mitgliedschaft",
+      "antwort_enthaelt": ["72"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "haus-mittagsruhe",
+      "frage": "Darf ich mittags die Bohrmaschine benutzen?",
+      "dokumente": ["hausordnung"],
+      "abschnitt": "Ruhezeiten",
+      "antwort_enthaelt": ["13:00"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "haus-papier",
+      "frage": "In welchem Rhythmus wird das Altpapier abgeholt?",
+      "dokumente": ["hausordnung"],
+      "abschnitt": "Müllentsorgung",
+      "antwort_enthaelt": ["zwei Wochen"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "arbeitsschutz-unfall",
+      "frage": "Wie schnell muss ein schwerer Arbeitsunfall der Berufsgenossenschaft gemeldet werden?",
+      "dokumente": ["arbeitsschutz"],
+      "abschnitt": "Meldung von Unfällen",
+      "antwort_enthaelt": ["drei Tagen"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "arbeitsschutz-ersthelfer",
+      "frage": "Wie viele Leute mit Erste-Hilfe-Schein müssen da sein?",
+      "dokumente": ["arbeitsschutz"],
+      "abschnitt": "Ersthelfer",
+      "antwort_enthaelt": ["zwei"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "fahrzeug-laden",
+      "frage": "Bekomme ich Geld, wenn ich den Dienstwagen zu Hause auflade?",
+      "dokumente": ["fahrzeugordnung"],
+      "abschnitt": "Tanken und Laden",
+      "antwort_enthaelt": ["30"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "fahrzeug-privat",
+      "frage": "Was kostet es steuerlich, wenn ich den Firmenwagen privat fahre?",
+      "dokumente": ["fahrzeugordnung"],
+      "abschnitt": "Private Nutzung",
+      "antwort_enthaelt": ["ein Prozent"],
+      "typ": "eindeutig"
+    },
+    {
+      "id": "scan-kosten",
+      "frage": "Was kostet das Fachseminar Schweißtechnik laut Antrag?",
+      "dokumente": ["gescannter-antrag"],
+      "antwort_enthaelt": ["1.890"],
+      "typ": "eindeutig",
+      "notiz": "Nur über OCR erreichbar — das PDF hat keinen Textlayer"
+    },
+    {
+      "id": "mehrdeutig-kuendigungsfrist",
+      "frage": "Wie lang ist die Kündigungsfrist?",
+      "dokumente": [
+        "mietvertrag-gewerbe",
+        "mietvertrag-wohnung",
+        "arbeitsvertrag",
+        "kuendigungsschreiben-muster"
+      ],
+      "typ": "mehrdeutig",
+      "notiz": "Vier Dokumente enthalten das Wort. Ein Treffer genügt, aber die Antwort sollte die Mehrdeutigkeit benennen."
+    },
+    {
+      "id": "mehrdeutig-schadenmeldung",
+      "frage": "Wie schnell muss ich einen Schaden melden?",
+      "dokumente": ["betriebshaftpflicht", "gebaeudeversicherung", "fahrzeugordnung"],
+      "typ": "mehrdeutig"
+    },
+    {
+      "id": "mehrdeutig-loeschfrist",
+      "frage": "Wie lange werden Daten aufbewahrt, bevor sie gelöscht werden?",
+      "dokumente": ["datenschutzkonzept", "loeschkonzept-personal", "auftragsverarbeitung"],
+      "typ": "mehrdeutig"
+    },
+    {
+      "id": "ohne-altersvorsorge",
+      "frage": "Wie hoch ist der Zuschuss zur betrieblichen Altersvorsorge?",
+      "dokumente": [],
+      "typ": "ohne_antwort",
+      "notiz": "Distraktor: loeschkonzept-personal erwähnt 'betriebliche Altersversorgung', aber nur deren Aufbewahrungsdauer — nicht die Höhe."
+    },
+    {
+      "id": "ohne-stellplatz-preis",
+      "frage": "Was kostet der Stellplatz in der Tiefgarage zusätzlich?",
+      "dokumente": [],
+      "typ": "ohne_antwort",
+      "notiz": "Distraktor: mietvertrag-wohnung nennt einen Tiefgaragenstellplatz, aber keinen Preis dafür."
+    },
+    {
+      "id": "ohne-azubi-urlaub",
+      "frage": "Wie viele Urlaubstage bekommen Auszubildende?",
+      "dokumente": [],
+      "typ": "ohne_antwort",
+      "notiz": "Distraktor: Urlaub ist geregelt, aber nicht für Auszubildende."
+    },
+    {
+      "id": "ohne-betriebsferien",
+      "frage": "Wann sind die Betriebsferien?",
+      "dokumente": [],
+      "typ": "ohne_antwort"
+    },
+    {
+      "id": "ohne-mindestlohn",
+      "frage": "Wie hoch ist der gesetzliche Mindestlohn?",
+      "dokumente": [],
+      "typ": "ohne_antwort",
+      "notiz": "Allgemeinwissen, das das Modell hätte — darf es aber nicht aus dem Kontext behaupten."
+    },
+    {
+      "id": "ohne-kantine",
+      "frage": "Was kostet das Mittagessen in der Kantine?",
+      "dokumente": [],
+      "typ": "ohne_antwort",
+      "notiz": "Distraktor: bewirtungsordnung nennt Essensbeträge, aber für Bewirtung, nicht für eine Kantine."
+    }
+  ]
+}

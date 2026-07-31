@@ -21,6 +21,12 @@ from rag.detect import (
     simulate,
 )
 from rag.embed import Embedder, EmbeddingError, load_embedder_config
+from rag.evaluate import (
+    DEFAULT_GOLD_PATH,
+    EvaluationError,
+    evaluate,
+    load_gold,
+)
 from rag.extract import ExtractionError, convert, probe
 from rag.generate import NO_CONTEXT_ANSWER, GenerationError, gguf_path
 from rag.ingest import IngestReport, ingest_paths, search_index
@@ -743,6 +749,185 @@ def ask(
             )
 
     console.print(f"\n  [dim]{duration:.1f}s[/]\n")
+
+
+@app.command(name="eval")
+def eval_cmd(
+    index: Path = typer.Option(DEFAULT_INDEX_PATH, "--index", help="Index-Datei"),
+    gold: Path = typer.Option(
+        DEFAULT_GOLD_PATH, "--gold", help="Goldstandard als JSON"
+    ),
+    top_k: int = typer.Option(5, "-k", "--top-k", help="Zu bewertende Treffer"),
+    no_rerank: bool = typer.Option(
+        False, "--no-rerank", help="Ohne Reranking messen, zum Vergleich"
+    ),
+    answers: bool = typer.Option(
+        False, "--answers", help="Auch Antworten erzeugen und prüfen (langsam)"
+    ),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Debug-Ausgabe"),
+) -> None:
+    """Messe Retrieval-Güte gegen den Goldstandard."""
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+
+    if not index.exists():
+        console.print(f"[red]Fehler:[/] kein Index unter {index} — erst 'rag ingest'")
+        raise typer.Exit(1)
+
+    try:
+        questions = load_gold(gold)
+        settings = replace(
+            Settings.load(fallback=Settings.for_platform()),
+            index_path=index,
+            top_k=top_k,
+        )
+        if no_rerank:
+            settings = replace(settings, reranker_enabled=False)
+        # Ohne Schwelle messen: die Kurve unten braucht alle Treffer, sonst
+        # wären die Zahlen bereits durch die Einstellung vorgefiltert.
+        settings = replace(settings, min_rerank_score=0.0)
+    except (EvaluationError, WhichllmError) as exc:
+        console.print(f"[red]Fehler:[/] {exc}")
+        raise typer.Exit(1) from exc
+
+    pipeline = RagPipeline(settings)
+    try:
+        with console.status("[dim]messe…[/]") as status:
+
+            def on_progress(position: int, total: int, question) -> None:
+                status.update(f"[dim]{position}/{total} {question.id}[/]")
+
+            report = evaluate(pipeline, questions, progress=on_progress)
+
+        _render_eval(report)
+
+        if answers:
+            _render_answer_checks(pipeline, questions, console)
+    except (PipelineError, StoreError, EmbeddingError, RerankError, GenerationError) as exc:
+        console.print(f"[red]Fehler:[/] {exc}")
+        raise typer.Exit(1) from exc
+    finally:
+        pipeline.close()
+
+
+def _render_eval(report) -> None:
+    metrik = "Rerank-Punkte" if report.reranked else "Vektorähnlichkeit"
+    console.print()
+    console.print(
+        f"[bold]{len(report.results)} Fragen[/] — "
+        f"{len(report.answerable)} beantwortbar, "
+        f"{len(report.unanswerable)} ohne Antwort im Korpus. "
+        f"Gemessen an {metrik}, {report.duration_seconds:.1f}s"
+    )
+    console.print()
+
+    table = Table(show_lines=False)
+    table.add_column("Maß")
+    table.add_column("Wert", justify="right")
+    for k in (1, 3, 5):
+        if k <= report.top_k:
+            table.add_row(f"Recall@{k}", f"{report.recall_at(k):.1%}")
+    table.add_row("MRR", f"{report.mrr():.3f}")
+    console.print(table)
+
+    correct_low, correct_high = report.correct_score_range()
+    noise_low, noise_high = report.noise_score_range()
+    console.print()
+    console.print("[bold]Punktwerte[/]")
+    console.print(
+        f"  richtige Treffer:  {correct_low:.4f} bis {correct_high:.4f}"
+    )
+    console.print(
+        f"  Rauschen (Fragen ohne Antwort): {noise_low:.4f} bis {noise_high:.4f}"
+    )
+    if correct_low < noise_high:
+        console.print(
+            "  [yellow]![/] Die Bereiche überlappen — keine Schwelle trennt "
+            "sauber zwischen richtig und Rauschen."
+        )
+    else:
+        console.print(
+            f"  [green]✓[/] Bereiche trennbar: eine Schwelle zwischen "
+            f"{noise_high:.4f} und {correct_low:.4f} filtert Rauschen ohne Verlust."
+        )
+
+    console.print()
+    console.print("[bold]Wirkung der Relevanzschwelle[/]")
+    threshold_table = Table(show_lines=False)
+    threshold_table.add_column("Schwelle", justify="right")
+    threshold_table.add_column("Recall", justify="right")
+    threshold_table.add_column("Präzision", justify="right")
+    threshold_table.add_column("Rauschen bleibt", justify="right")
+    threshold_table.add_column("verliert", overflow="fold")
+
+    for row in report.thresholds():
+        threshold_table.add_row(
+            f"{row.threshold:.3f}",
+            f"{row.recall:.1%}",
+            f"{row.precision:.1%}",
+            str(row.noise_kept),
+            ", ".join(row.lost[:3]) + ("…" if len(row.lost) > 3 else "") or "—",
+        )
+    console.print(threshold_table)
+
+    if report.misses:
+        console.print()
+        console.print("[bold]Nicht gefunden[/]")
+        for result in report.misses:
+            erwartet = ", ".join(result.question.dokumente) or "(keins)"
+            gefunden = ", ".join(h.document for h in result.hits[:3]) or "(nichts)"
+            console.print(f"  [red]×[/] {result.question.id}")
+            console.print(f"    [dim]{result.question.frage}[/]")
+            console.print(f"    erwartet: {erwartet}")
+            console.print(f"    gefunden: {gefunden}")
+    console.print()
+
+
+def _render_answer_checks(pipeline, questions, out) -> None:
+    from rag.evaluate import check_answers
+
+    out.print("[bold]Antworten prüfen[/] [dim](rund 20 s je Frage)[/]")
+    with out.status("[dim]generiere…[/]") as status:
+
+        def on_progress(position: int, total: int, question) -> None:
+            status.update(f"[dim]{position}/{total} {question.id}[/]")
+
+        checks = check_answers(pipeline, questions, progress=on_progress)
+
+    answerable = [c for c in checks if c.question.answerable and c.question.antwort_enthaelt]
+    unanswerable = [c for c in checks if not c.question.answerable]
+
+    korrekt = sum(c.answered_correctly for c in answerable)
+    eingeraeumt = sum(c.admitted_ignorance for c in unanswerable)
+
+    out.print()
+    if answerable:
+        out.print(
+            f"  Erwartete Angabe in der Antwort: "
+            f"[bold]{korrekt}/{len(answerable)}[/] ({korrekt / len(answerable):.0%})"
+        )
+    if unanswerable:
+        out.print(
+            f"  Nichtwissen korrekt eingeräumt: "
+            f"[bold]{eingeraeumt}/{len(unanswerable)}[/] "
+            f"({eingeraeumt / len(unanswerable):.0%})"
+        )
+
+    for check in answerable:
+        if not check.answered_correctly:
+            fehlt = ", ".join(check.question.antwort_enthaelt)
+            out.print(f"  [yellow]![/] {check.question.id}: erwartet '{fehlt}'")
+            out.print(f"    [dim]{check.text[:180]}[/]")
+    for check in unanswerable:
+        if not check.admitted_ignorance:
+            out.print(
+                f"  [red]×[/] {check.question.id}: hat geantwortet statt "
+                "Nichtwissen einzuräumen"
+            )
+            out.print(f"    [dim]{check.text[:180]}[/]")
+    out.print()
 
 
 @app.command()
