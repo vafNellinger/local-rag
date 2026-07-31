@@ -8,14 +8,26 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from dataclasses import dataclass
 from pathlib import Path
 
-from rag.detect import Platform, WhichllmError, detect_local, simulate
+from rag.detect import (
+    Platform,
+    WhichllmError,
+    detect_local,
+    load_config,
+    simulate,
+)
 from rag.embed import Embedder, EmbeddingError, load_embedder_config
 from rag.extract import ExtractionError, convert, probe
 from rag.ingest import IngestReport, ingest_paths, search_index
 from rag.resolve import PipelinePlan, ResolutionError, resolve_pipeline
-from rag.store import DEFAULT_INDEX_NAME, IndexStore, StoreError
+from rag.store import (
+    DEFAULT_INDEX_NAME,
+    IndexStore,
+    StoreError,
+    read_index_meta,
+)
 
 app = typer.Typer(
     add_completion=False,
@@ -52,7 +64,9 @@ def _render(plan: PipelinePlan) -> None:
     table.add_column("Gerät")
     table.add_column("VRAM", justify="right")
     table.add_column("Speed", justify="right")
-    table.add_column("Quelle")
+    # fold statt abschneiden: "config:default" wird sonst zu "config:def…" und
+    # das aktive Profil ist genau die Information, die hier zählt.
+    table.add_column("Quelle", overflow="fold")
 
     for spec in plan.specs:
         vram = (
@@ -270,6 +284,58 @@ def convert_cmd(
     console.print()
 
 
+@dataclass(frozen=True)
+class EmbedderChoice:
+    """Welcher Embedder auf welchem Gerät, und woher die Wahl kommt."""
+
+    profile: str
+    device: str
+    origin: str
+
+
+def _choose_embedder(
+    index: Path, profile: str | None, device: str | None
+) -> EmbedderChoice:
+    """Embedder-Profil und Gerät bestimmen, in dieser Rangfolge.
+
+    1. Was der Anwender ausdrücklich angibt.
+    2. Was im Index steht. Ein bestehender Index gibt das Modell vor — sonst
+       würde die Plattformerkennung ihn bei jedem Lauf invalidieren, obwohl
+       sich nur die Hardware geändert hat.
+    3. Die Plattformklasse aus ``platforms.toml``.
+
+    Nur Schritt 3 erkennt die Plattform, und zwar über ``detect_local()``:
+    das liest den Hardware-Block (``whichllm -n 1``, 24 h gecacht) und löst
+    ausdrücklich *nicht* den Generator auf. ``resolve_pipeline()`` wäre hier
+    falsch — es würde für eine Embedder-Frage das Modell-Ranking anstoßen.
+    """
+    if profile and device:
+        return EmbedderChoice(profile, device, "explizit angegeben")
+
+    stored = read_index_meta(index)
+    chosen_profile = profile or stored.get("embedder_profile")
+    origin = "aus dem Index" if chosen_profile and not profile else "explizit angegeben"
+
+    if chosen_profile and device:
+        return EmbedderChoice(chosen_profile, device, origin)
+
+    # Für das Gerät (und ein noch unbekanntes Profil) die Plattform befragen.
+    platform = detect_local()
+    class_config = load_config().get("platform_class", {}).get(
+        platform.platform_class, {}
+    )
+
+    if not chosen_profile:
+        chosen_profile = str(class_config.get("embedder_profile", "default"))
+        origin = f"aus Plattformklasse {platform.platform_class}"
+
+    chosen_device = device or str(class_config.get("embedder_device", "cpu"))
+    if not device:
+        origin = f"{origin}, Gerät aus Klasse {platform.platform_class}"
+
+    return EmbedderChoice(chosen_profile, chosen_device, origin)
+
+
 def _open_store(
     index: Path, profile: str, *, device: str = "auto"
 ) -> tuple[IndexStore, Embedder]:
@@ -282,7 +348,10 @@ def _open_store(
     config = load_embedder_config(profile)
     embedder = Embedder(config, device=device)
     store = IndexStore(
-        index, embedder=config.model_id, dimensions=config.dimensions
+        index,
+        embedder=config.model_id,
+        dimensions=config.dimensions,
+        profile=profile,
     ).open()
     return store, embedder
 
@@ -339,11 +408,15 @@ def _render_ingest(report: IngestReport) -> None:
 def ingest(
     paths: list[Path] = typer.Argument(..., help="Dateien oder Verzeichnisse"),
     index: Path = typer.Option(DEFAULT_INDEX_PATH, "--index", help="Index-Datei"),
-    profile: str = typer.Option(
-        "default", "--profile", help="Embedder-Profil aus platforms.toml"
+    profile: str | None = typer.Option(
+        None,
+        "--profile",
+        help="Embedder-Profil erzwingen; ohne Angabe aus Index oder Plattform",
     ),
-    device: str = typer.Option(
-        "auto", "--device", help="auto, cpu, cuda oder mps"
+    device: str | None = typer.Option(
+        None,
+        "--device",
+        help="cpu, gpu, cuda oder mps; ohne Angabe aus der Plattformklasse",
     ),
     force: bool = typer.Option(
         False, "--force", help="Auch unveränderte Dateien neu einlesen"
@@ -363,14 +436,16 @@ def ingest(
     )
 
     try:
-        store, embedder = _open_store(index, profile, device=device)
-    except (StoreError, EmbeddingError) as exc:
+        choice = _choose_embedder(index, profile, device)
+        store, embedder = _open_store(index, choice.profile, device=choice.device)
+    except (StoreError, EmbeddingError, WhichllmError) as exc:
         console.print(f"[red]Fehler:[/] {exc}")
         raise typer.Exit(1) from exc
 
     console.print(
         f"[dim]Index:[/] {index}\n"
-        f"[dim]Embedder:[/] {embedder.config.model_id} auf {embedder.device}"
+        f"[dim]Embedder:[/] {embedder.config.model_id} auf {embedder.device} "
+        f"[dim]({choice.profile}, {choice.origin})[/]"
     )
 
     # Der erste Lauf lädt das Modell — ohne Hinweis sieht die Pause wie ein
@@ -406,8 +481,11 @@ def ingest(
 def search(
     query: str = typer.Argument(..., help="Suchbegriff oder Frage"),
     index: Path = typer.Option(DEFAULT_INDEX_PATH, "--index", help="Index-Datei"),
-    profile: str = typer.Option(
-        "default", "--profile", help="Embedder-Profil aus platforms.toml"
+    profile: str | None = typer.Option(
+        None, "--profile", help="Embedder-Profil erzwingen; ohne Angabe aus dem Index"
+    ),
+    device: str | None = typer.Option(
+        None, "--device", help="cpu, gpu, cuda oder mps"
     ),
     limit: int = typer.Option(5, "-n", "--limit", help="Zahl der Treffer"),
     full: bool = typer.Option(False, "--full", help="Chunks vollständig zeigen"),
@@ -423,8 +501,18 @@ def search(
         console.print(f"[red]Fehler:[/] kein Index unter {index} — erst 'rag ingest'")
         raise typer.Exit(1)
 
+    # Das Profil kommt aus dem Index, nicht aus der Plattform: gesucht werden
+    # muss mit dem Modell, mit dem indiziert wurde. Nebeneffekt — eine Suche
+    # kostet keine Plattformerkennung, was bei 79 ms Query-Latenz auch nicht
+    # tragbar wäre.
+    resolved_profile = profile or read_index_meta(index).get(
+        "embedder_profile", "default"
+    )
+
     try:
-        store, embedder = _open_store(index, profile)
+        store, embedder = _open_store(
+            index, resolved_profile, device=device or "auto"
+        )
     except (StoreError, EmbeddingError) as exc:
         console.print(f"[red]Fehler:[/] {exc}")
         raise typer.Exit(1) from exc
@@ -457,14 +545,13 @@ def search(
 @app.command()
 def status(
     index: Path = typer.Option(DEFAULT_INDEX_PATH, "--index", help="Index-Datei"),
-    profile: str = typer.Option(
-        "default", "--profile", help="Embedder-Profil aus platforms.toml"
-    ),
 ) -> None:
     """Zeige, was im Index liegt."""
     if not index.exists():
         console.print(f"\n  [yellow]kein Index unter[/] {index}\n")
         return
+
+    profile = read_index_meta(index).get("embedder_profile", "default")
 
     try:
         store, _ = _open_store(index, profile)
@@ -490,7 +577,7 @@ def status(
     )
     console.print(
         f"  Embedder: [cyan]{stats['embedder']}[/] "
-        f"({stats['dimensions']} Dimensionen)"
+        f"({stats['dimensions']} Dimensionen, Profil {stats['profile']})"
     )
 
     if documents:

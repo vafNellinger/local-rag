@@ -352,12 +352,24 @@ def _spec_from_candidate(
     )
 
 
-def _resolve_static(role: str, config: dict, device: str) -> ModelSpec:
-    """Löse Embedder oder Reranker über die Tabelle in platforms.toml auf."""
+def _resolve_static(
+    role: str, config: dict, device: str, profile: str = "default"
+) -> ModelSpec:
+    """Löse Embedder oder Reranker über die Tabelle in platforms.toml auf.
+
+    ``profile`` kommt aus der Plattformklasse. Damit hängt auch bei den
+    statischen Rollen die Modellwahl an der Hardware und nicht nur das Gerät —
+    vorher stand hier hart ``default``, und die übrigen Einträge in
+    ``[embedder.*]`` waren toter Text.
+    """
     section = config.get(role, {})
-    entry = section.get("default")
+    entry = section.get(profile)
     if not entry:
-        raise ResolutionError(f"platforms.toml hat keinen Eintrag [{role}.default]")
+        available = ", ".join(sorted(section)) or "(keine)"
+        raise ResolutionError(
+            f"platforms.toml hat keinen Eintrag [{role}.{profile}]. "
+            f"Vorhanden: {available}"
+        )
 
     vram_bytes = None
     if device == "gpu" and (mb := entry.get("vram_estimate_mb")):
@@ -367,11 +379,16 @@ def _resolve_static(role: str, config: dict, device: str) -> ModelSpec:
         role=role,
         model_id=str(entry["model_id"]),
         device=device,
-        source="config",
+        # Das Profil gehört in die Quellenangabe: sonst zeigt 'rag plan' nur
+        # "config" und man sieht nicht, welcher Eintrag gewonnen hat.
+        source=f"config:{profile}",
         vram_required_bytes=vram_bytes,
         dimensions=entry.get("dimensions"),
         max_seq_length=entry.get("max_seq_length"),
-        notes=("aus platforms.toml; whichllm kennt diese Rolle nicht",),
+        notes=(
+            f"aus platforms.toml [{role}.{profile}]; "
+            "whichllm kennt diese Rolle nicht",
+        ),
     )
 
 
@@ -401,13 +418,19 @@ def resolve_pipeline(
     warnings: list[str] = []
 
     embedder = _resolve_static(
-        "embedder", cfg, str(class_config.get("embedder_device", "cpu"))
+        "embedder",
+        cfg,
+        str(class_config.get("embedder_device", "cpu")),
+        str(class_config.get("embedder_profile", "default")),
     )
 
     reranker: ModelSpec | None = None
     if class_config.get("reranker_enabled", True):
         reranker = _resolve_static(
-            "reranker", cfg, str(class_config.get("reranker_device", "cpu"))
+            "reranker",
+            cfg,
+            str(class_config.get("reranker_device", "cpu")),
+            str(class_config.get("reranker_profile", "default")),
         )
     else:
         warnings.append(

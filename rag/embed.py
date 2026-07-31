@@ -90,21 +90,12 @@ def load_embedder_config(
     )
 
 
-def resolve_device(requested: str = "auto") -> str:
-    """Gerät für das Embedding bestimmen.
-
-    ``auto`` fragt Torch. Bewusst nicht über ``platforms.toml`` und
-    ``resolve_pipeline()``: dort wird das Gerät gegen ein VRAM-Budget geplant,
-    das den Generator einschließt. Beim Ingest ist kein Generator geladen, der
-    Embedder hat die Karte für sich — die Einschränkung dort gilt hier nicht.
-    """
-    if requested != "auto":
-        return requested
-
+def _best_gpu() -> str | None:
+    """Der von Torch nutzbare Beschleuniger, oder None."""
     try:
         import torch
     except ImportError:  # pragma: no cover
-        return "cpu"
+        return None
 
     if torch.cuda.is_available():
         return "cuda"
@@ -113,7 +104,37 @@ def resolve_device(requested: str = "auto") -> str:
     # Zweig oben herein.
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         return "mps"
-    return "cpu"
+    return None
+
+
+def resolve_device(requested: str = "auto") -> str:
+    """Gerätename für Torch bestimmen.
+
+    Nimmt auch ``"gpu"`` an, weil ``platforms.toml`` in dieser Sprache
+    schreibt — Torch kennt nur ``cuda`` und ``mps``. Ist die gewünschte GPU
+    nicht da, wird auf CPU zurückgefallen *und gewarnt*: auf dieser Maschine
+    ist genau das der Normalfall (CUDA-Build von Torch, AMD-iGPU unsichtbar),
+    und ein stiller Fallback würde die Ursache verschleiern.
+    """
+    if requested in {"auto", "gpu"}:
+        if gpu := _best_gpu():
+            return gpu
+        if requested == "gpu":
+            logger.warning(
+                "Gerät 'gpu' gewünscht, aber Torch sieht keinen Beschleuniger "
+                "— Embedding läuft auf der CPU"
+            )
+        return "cpu"
+
+    if requested in {"cuda", "mps"} and _best_gpu() is None:
+        logger.warning(
+            "Gerät '%s' gewünscht, aber Torch sieht keinen Beschleuniger "
+            "— Embedding läuft auf der CPU",
+            requested,
+        )
+        return "cpu"
+
+    return requested
 
 
 class Embedder:

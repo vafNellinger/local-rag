@@ -209,9 +209,38 @@ kaputte Datei beendet den Lauf nicht — bei hundert Dateien ist eine kaputte di
 Regel, und ein Abbruch bei Datei 80 verschenkt die Extraktionszeit der ersten
 79.
 
-Beim Ingest darf der Embedder die GPU nehmen, auch wenn `platforms.toml` ihn
-für die Query-Phase auf die CPU legt: dort teilt er sich das VRAM mit dem
-Generator, hier ist keiner geladen. `--device` überschreibt.
+### Welcher Embedder, auf welchem Gerät
+
+Wie beim Generator entscheidet die Plattform, nicht der Code. `platforms.toml`
+legt pro Plattformklasse `embedder_profile` und `embedder_device` fest; die
+Profile stehen unter `[embedder.*]`. Die Rangfolge:
+
+1. **Was angegeben ist.** `--profile` / `--device`.
+2. **Was im Index steht.** Ein bestehender Index gibt das Modell vor, sonst
+   würde ein Hardwarewechsel ihn bei jedem Lauf invalidieren. Das Profil liegt
+   dafür in der `meta`-Tabelle.
+3. **Die Plattformklasse.**
+
+`rag search` fragt nur den Index — gesucht werden *muss* mit dem Modell, mit
+dem indiziert wurde. Nebeneffekt: eine Suche kostet keine Plattformerkennung,
+was bei 79 ms Query-Latenz auch nicht tragbar wäre. Nur `rag ingest` erkennt
+die Plattform, und zwar über `detect_local()` (Hardware-Block, 24 h gecacht) —
+nicht über `resolve_pipeline()`, das für eine Embedder-Frage das
+Generator-Ranking anstoßen würde.
+
+Beim Embedder ist die plattformabhängige Wahl **enger als beim Generator**:
+das Modell muss zwischen Ingest und Query dasselbe sein, sonst passt der Index
+nicht zur Anfrage. Ein großes Embedding-Modell konkurriert bei der Query also
+direkt mit dem Generator um VRAM, und „beim Ingest groß, bei der Query klein"
+ist keine Option. Damit bleibt als sinnvolle Staffelung nur ein *kleineres*
+Modell auf schwacher Hardware, nicht ein größeres auf starker — deshalb zeigen
+derzeit alle Klassen auf `default`, und die Zuordnung wartet auf eine Messung
+an echten Dokumenten statt auf eine Leaderboard-Zahl.
+
+Fällt ein gewünschtes Gerät weg, wird gewarnt statt still auf CPU
+zurückgefallen: auf dieser Maschine ist genau das der Normalfall (CUDA-Build
+von Torch, AMD-iGPU unsichtbar), und ein stiller Fallback lässt einen die
+Ursache der Langsamkeit an der falschen Stelle suchen.
 
 Gemessen auf dieser Maschine (12 Kerne, CPU, bge-m3):
 

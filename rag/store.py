@@ -101,6 +101,34 @@ def file_sha256(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def read_index_meta(path: str | Path) -> dict[str, str]:
+    """Die ``meta``-Tabelle eines bestehenden Index lesen.
+
+    Freie Funktion und ohne sqlite-vec, weil sie ein Henne-Ei-Problem löst:
+    um den Index zu *öffnen*, braucht man Modell und Dimension — und die
+    stehen im Index. ``rag search`` liest sie hiermit, statt die Plattform neu
+    zu erkennen. Das ist zugleich die Garantie, dass gesucht wird, womit
+    indiziert wurde.
+
+    Gibt ein leeres Dict zurück, wenn die Datei kein lesbarer Index ist.
+    """
+    file_path = Path(path).expanduser()
+    if not file_path.exists():
+        return {}
+    try:
+        connection = sqlite3.connect(f"file:{file_path}?mode=ro", uri=True)
+    except sqlite3.OperationalError:
+        return {}
+    try:
+        rows = connection.execute("SELECT key, value FROM meta").fetchall()
+    except sqlite3.DatabaseError:
+        # Keine meta-Tabelle oder gar keine SQLite-Datei.
+        return {}
+    finally:
+        connection.close()
+    return {str(key): str(value) for key, value in rows}
+
+
 def _connect(path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
@@ -139,10 +167,12 @@ class IndexStore:
         *,
         embedder: str,
         dimensions: int,
+        profile: str = "default",
     ) -> None:
         self.path = Path(path).expanduser()
         self.embedder = embedder
         self.dimensions = dimensions
+        self.profile = profile
         self._connection: sqlite3.Connection | None = None
 
     # ─── Lebenszyklus ────────────────────────────────────────────────────────
@@ -238,8 +268,13 @@ class IndexStore:
         }
 
         if not stored:
+            # Das Profil ist Metadatum, nicht Kompatibilitätskriterium: welches
+            # Modell im Raum liegt, entscheidet 'embedder'. Der Profilname sagt
+            # nur, wo 'rag search' die zugehörige Konfiguration findet — zwei
+            # Profile mit demselben model_id sind austauschbar.
             db.executemany(
-                "INSERT INTO meta(key, value) VALUES (?, ?)", expected.items()
+                "INSERT INTO meta(key, value) VALUES (?, ?)",
+                {**expected, "embedder_profile": self.profile}.items(),
             )
             db.commit()
             return
@@ -266,6 +301,16 @@ class IndexStore:
                 f"Index hat {stored.get('dimensions')} Dimensionen, "
                 f"angefragt sind {self.dimensions} — Index neu aufbauen"
             )
+
+        # Index aus einer Version ohne Profilfeld: nachtragen statt ablehnen,
+        # das Modell stimmt ja. Sonst müsste ein bestehender Index für ein
+        # reines Metadatum neu gebaut werden.
+        if "embedder_profile" not in stored:
+            db.execute(
+                "INSERT INTO meta(key, value) VALUES ('embedder_profile', ?)",
+                (self.profile,),
+            )
+            db.commit()
 
     # ─── Schreiben ───────────────────────────────────────────────────────────
 
@@ -464,6 +509,7 @@ class IndexStore:
             "vectors": vectors,
             "tokens": tokens,
             "embedder": self.embedder,
+            "profile": self.profile,
             "dimensions": self.dimensions,
             "path": str(self.path),
         }

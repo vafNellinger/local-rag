@@ -105,11 +105,29 @@ device = "cpu"
 
 
 # ─── Plattformklassen ────────────────────────────────────────────────────────
+#
+# Jede Klasse legt pro Rolle Gerät *und* Modellprofil fest. Das Profil zeigt
+# auf einen der Einträge oben, z.B. [embedder.default].
+#
+# Warum alle Klassen derzeit auf "default" zeigen: beim Embedder ist die
+# plattformabhängige Wahl enger als beim Generator, weil das Modell zwischen
+# Ingest und Query dasselbe sein muss — sonst passt der Index nicht zur
+# Anfrage. Ein großes Embedding-Modell konkurriert bei der Query also direkt
+# mit dem Generator um VRAM, und "beim Ingest groß, bei der Query klein" ist
+# keine Option.
+#
+# Damit bleibt als sinnvolle Staffelung nur ein *kleineres* Modell auf
+# schwacher Hardware, nicht ein größeres auf starker. Auf cpu_only wäre das
+# der Kandidat: bge-m3 schafft dort gemessen 1,2 Chunks/s, ein Modell der
+# 100M-Klasse wäre mehrfach schneller bei schlechterem Retrieval. Diese
+# Abwägung braucht eine Messung an echten Dokumenten, nicht eine
+# Leaderboard-Zahl — deshalb steht hier bewusst noch überall "default".
 
 [platform_class.cpu_only]
 description = "Keine nutzbare GPU"
 generator_device = "cpu"
 embedder_device = "cpu"
+embedder_profile = "default"
 reranker_device = "cpu"
 # Reranking auf CPU ohne GPU-Generator verdoppelt die Query-Latenz für
 # vergleichsweise wenig Qualitätsgewinn — hier optional.
@@ -129,6 +147,7 @@ min_params_b = 1.5
 description = "Integrierte GPU mit geteiltem Speicher (<= 10 GB)"
 generator_device = "gpu"
 embedder_device = "cpu"
+embedder_profile = "default"
 reranker_device = "cpu"
 reranker_enabled = true
 context_length = "32k"
@@ -138,6 +157,7 @@ whichllm_args = []
 description = "Dedizierte GPU, 10-20 GB"
 generator_device = "gpu"
 embedder_device = "gpu"
+embedder_profile = "default"
 reranker_device = "cpu"
 reranker_enabled = true
 context_length = "32k"
@@ -147,6 +167,7 @@ whichllm_args = []
 description = "Dedizierte GPU, > 20 GB"
 generator_device = "gpu"
 embedder_device = "gpu"
+embedder_profile = "default"
 reranker_device = "gpu"
 reranker_enabled = true
 context_length = "64k"

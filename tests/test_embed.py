@@ -70,12 +70,26 @@ class TestLoadConfig:
 
 
 class TestResolveDevice:
-    def test_explizite_angabe_wird_uebernommen(self):
+    def test_cpu_wird_immer_uebernommen(self):
         assert resolve_device("cpu") == "cpu"
-        assert resolve_device("cuda") == "cuda"
 
     def test_auto_liefert_ein_bekanntes_geraet(self):
         assert resolve_device("auto") in {"cpu", "cuda", "mps"}
+
+    def test_gpu_aus_platforms_toml_wird_uebersetzt(self):
+        # platforms.toml schreibt "gpu", Torch kennt nur cuda/mps.
+        assert resolve_device("gpu") in {"cpu", "cuda", "mps"}
+
+    def test_fehlende_gpu_faellt_auf_cpu_zurueck(self, caplog):
+        # Auf dieser Maschine der Normalfall: CUDA-Build von Torch, AMD-iGPU
+        # unsichtbar. Der Fallback darf nicht still passieren, sonst sucht man
+        # die Ursache der Langsamkeit an der falschen Stelle.
+        import rag.embed
+
+        if rag.embed._best_gpu() is not None:
+            pytest.skip("Maschine hat einen von Torch nutzbaren Beschleuniger")
+        assert resolve_device("cuda") == "cpu"
+        assert any("kein" in r.message.lower() for r in caplog.records)
 
 
 class TestEmbedder:
@@ -88,10 +102,20 @@ class TestEmbedder:
         )
         assert not embedder.is_loaded
 
-    def test_batchgroesse_haengt_am_geraet(self):
+    def test_batchgroesse_haengt_am_aufgeloesten_geraet(self):
+        # Am aufgeloesten, nicht am gewuenschten: wer "cuda" verlangt und keine
+        # Karte hat, laeuft auf CPU und braucht dann auch den CPU-Batch.
         config = EmbedderConfig(model_id="stub/x", dimensions=8, max_seq_length=128)
-        assert Embedder(config, device="cpu").batch_size == BATCH_SIZE_CPU
-        assert Embedder(config, device="cuda").batch_size == BATCH_SIZE_GPU
+        embedder = Embedder(config, device="cpu")
+        assert embedder.device == "cpu"
+        assert embedder.batch_size == BATCH_SIZE_CPU
+
+        auto = Embedder(config, device="auto")
+        erwartet = BATCH_SIZE_CPU if auto.device == "cpu" else BATCH_SIZE_GPU
+        assert auto.batch_size == erwartet
+
+    def test_gpu_batch_ist_groesser_als_cpu_batch(self):
+        assert BATCH_SIZE_GPU > BATCH_SIZE_CPU
 
     def test_batchgroesse_ist_ueberschreibbar(self):
         config = EmbedderConfig(model_id="stub/x", dimensions=8, max_seq_length=128)
