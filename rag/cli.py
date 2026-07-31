@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import re
+import time
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from rag.detect import (
@@ -20,7 +22,10 @@ from rag.detect import (
 )
 from rag.embed import Embedder, EmbeddingError, load_embedder_config
 from rag.extract import ExtractionError, convert, probe
+from rag.generate import NO_CONTEXT_ANSWER, GenerationError, gguf_path
 from rag.ingest import IngestReport, ingest_paths, search_index
+from rag.pipeline import PipelineError, RagPipeline, Settings
+from rag.rerank import RerankError
 from rag.resolve import PipelinePlan, ResolutionError, resolve_pipeline
 from rag.store import (
     DEFAULT_INDEX_NAME,
@@ -589,6 +594,176 @@ def status(
         console.print()
         console.print(table)
     console.print()
+
+
+@app.command()
+def pull(
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Debug-Ausgabe"),
+) -> None:
+    """Lade die GGUF-Datei des vom Plan gewählten Generators herunter."""
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+
+    try:
+        result = resolve_pipeline(detect_local())
+    except (WhichllmError, ResolutionError) as exc:
+        console.print(f"[red]Fehler:[/] {exc}")
+        raise typer.Exit(1) from exc
+
+    spec = result.generator
+    if not spec.artifact_repo_id or not spec.artifact_filename:
+        console.print(
+            f"[red]Fehler:[/] whichllm nennt für {spec.model_id} keine "
+            "GGUF-Datei — Quantisierung muss manuell gewählt werden"
+        )
+        raise typer.Exit(1)
+
+    if existing := gguf_path(spec.artifact_repo_id, spec.artifact_filename):
+        size_gb = existing.stat().st_size / (1024**3)
+        console.print(
+            f"\n  [green]schon da[/] {existing.name} ({size_gb:.1f} GB)\n"
+            f"  [dim]{existing}[/]\n"
+        )
+        return
+
+    console.print(
+        f"\n  lade [cyan]{spec.artifact_filename}[/] "
+        f"[dim]aus {spec.artifact_repo_id}[/]\n"
+        f"  [yellow]mehrere Gigabyte, das dauert[/]\n"
+    )
+    try:
+        path = gguf_path(
+            spec.artifact_repo_id, spec.artifact_filename, download=True
+        )
+    except GenerationError as exc:
+        console.print(f"[red]Fehler:[/] {exc}")
+        raise typer.Exit(1) from exc
+
+    size_gb = path.stat().st_size / (1024**3)
+    console.print(f"  [green]fertig[/] {size_gb:.1f} GB nach [dim]{path}[/]\n")
+
+
+@app.command()
+def ask(
+    question: str = typer.Argument(..., help="Die Frage"),
+    index: Path = typer.Option(DEFAULT_INDEX_PATH, "--index", help="Index-Datei"),
+    top_k: int = typer.Option(5, "-k", "--top-k", help="Quellen im Prompt"),
+    context: int | None = typer.Option(
+        None, "--context", help="Kontextfenster in Token"
+    ),
+    max_tokens: int = typer.Option(800, "--max-tokens", help="Länge der Antwort"),
+    no_rerank: bool = typer.Option(
+        False, "--no-rerank", help="Reranking überspringen"
+    ),
+    show_sources: bool = typer.Option(
+        True, "--sources/--no-sources", help="Quellen unter der Antwort listen"
+    ),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Debug-Ausgabe"),
+) -> None:
+    """Stelle eine Frage an den Index und lass sie beantworten."""
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+
+    if not index.exists():
+        console.print(f"[red]Fehler:[/] kein Index unter {index} — erst 'rag ingest'")
+        raise typer.Exit(1)
+
+    try:
+        settings = Settings.for_platform()
+    except WhichllmError as exc:
+        console.print(f"[red]Fehler:[/] {exc}")
+        raise typer.Exit(1) from exc
+
+    settings = replace(
+        settings,
+        index_path=index,
+        top_k=top_k,
+        max_tokens=max_tokens,
+        reranker_enabled=settings.reranker_enabled and not no_rerank,
+        **({"generator_context_length": context} if context else {}),
+    )
+
+    pipeline = RagPipeline(settings)
+    try:
+        with console.status("[dim]suche…[/]"):
+            hits = pipeline.retrieve(question)
+
+        if not hits:
+            console.print(f"\n  [yellow]{NO_CONTEXT_ANSWER}[/]\n")
+            return
+
+        console.print()
+        console.print(f"[bold]{question}[/]")
+        console.print()
+
+        sources, stream = pipeline.ask_stream(question)
+        # Streaming, weil die Generierung auf CPU gemessen bei 2 bis 8 Token
+        # pro Sekunde liegt — ohne laufende Ausgabe sieht das wie ein Hänger aus.
+        started = time.time()
+        pieces: list[str] = []
+        with console.status("[dim]denkt…[/]") as status:
+            for piece in stream:
+                if not pieces:
+                    status.stop()
+                pieces.append(piece)
+                console.print(piece, end="")
+        console.print()
+
+        answer = "".join(pieces)
+        duration = time.time() - started
+    except (PipelineError, StoreError, EmbeddingError, RerankError, GenerationError) as exc:
+        console.print(f"[red]Fehler:[/] {exc}")
+        raise typer.Exit(1) from exc
+    finally:
+        pipeline.close()
+
+    if show_sources:
+        console.print()
+        cited = {
+            int(n) for n in re.findall(r"\[(\d+)\]", answer) if n.isdigit()
+        }
+        for source in sources:
+            mark = "[green]✓[/]" if source.number in cited else "[dim]·[/]"
+            score = (
+                f" [dim]{source.hit.rerank_score:+.3f}[/]"
+                if source.hit.rerank_score is not None
+                else f" [dim]{source.hit.similarity:.3f}[/]"
+            )
+            console.print(f"  {mark} [{source.number}] {source.citation}{score}")
+        # Unzitierte Quellen sind ein Hinweis, nicht ein Fehler: viele davon
+        # heißen, dass die Suche breit gestreut hat oder top_k zu hoch ist.
+        if uncited := len(sources) - len(cited):
+            console.print(
+                f"  [dim]{uncited} Quelle(n) nicht zitiert — "
+                f"top_k senken oder min_rerank_score setzen[/]"
+            )
+
+    console.print(f"\n  [dim]{duration:.1f}s[/]\n")
+
+
+@app.command()
+def gui(
+    index: Path = typer.Option(DEFAULT_INDEX_PATH, "--index", help="Index-Datei"),
+    port: int = typer.Option(8080, "--port", help="Port für die Oberfläche"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Adresse zum Binden"),
+    no_browser: bool = typer.Option(
+        False, "--no-browser", help="Browser nicht automatisch öffnen"
+    ),
+) -> None:
+    """Starte die grafische Oberfläche."""
+    try:
+        from rag.ui import run
+    except ImportError as exc:
+        console.print(
+            f"[red]Fehler:[/] NiceGUI fehlt: uv pip install -e '.[gui]' ({exc})"
+        )
+        raise typer.Exit(1) from exc
+
+    run(index_path=index, host=host, port=port, open_browser=not no_browser)
 
 
 if __name__ == "__main__":

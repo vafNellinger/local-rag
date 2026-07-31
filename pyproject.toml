@@ -22,8 +22,17 @@ ingest = [
     "sentence-transformers>=3.0",
     "sqlite-vec>=0.1",
 ]
+# Der Generator. Es gibt keine Wheels — llama-cpp-python kompiliert beim
+# Installieren und braucht dafür einen C++-Compiler; cmake zieht es sich als
+# Build-Abhängigkeit selbst. Der so entstehende Build kann nur CPU. Für
+# GPU-Betrieb neu bauen, z.B. mit CMAKE_ARGS="-DGGML_VULKAN=ON".
 generate = [
     "llama-cpp-python>=0.3",
+]
+# Oberfläche. NiceGUI bringt seinen eigenen Webserver mit; die Anwendung
+# lauscht nur auf localhost.
+gui = [
+    "nicegui>=2.0",
 ]
 dev = [
     "pytest>=8.0",

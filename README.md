@@ -2,9 +2,10 @@
 
 Lokales RAG-System, dessen Modellauswahl von der Zielplattform abhängt.
 
-Stand: **Schritt 2 von 5** — Plattformerkennung, Modellauflösung und der
-komplette Ingest stehen: Extraktion, Chunking, Embedding, Index, Vektorsuche.
-Reranking und Generierung fehlen noch.
+Stand: **Schritt 3 von 5** — die Kette ist vollständig: Extraktion, Chunking,
+Embedding, Index, Vektorsuche, Reranking, Antwortgenerierung. Bedienbar über
+CLI und grafische Oberfläche. Offen sind Messungen (Schritt 4) und der
+Upstream-Beitrag an whichllm (Schritt 5).
 
 ## Idee
 
@@ -22,9 +23,17 @@ strukturell nicht kennt: `models/hf.py` filtert hart auf
 ## Setup
 
 ```bash
-uv venv && uv pip install -e .
+uv venv && uv pip install -e ".[ingest,generate,gui]"
 pipx install whichllm     # falls noch nicht vorhanden
 ```
+
+`llama-cpp-python` hat keine Wheels und kompiliert beim Installieren; ein
+C++-Compiler muss da sein, cmake zieht es sich selbst. Der so entstehende Build
+kann **nur CPU** — für GPU-Betrieb neu bauen, etwa mit
+`CMAKE_ARGS="-DGGML_VULKAN=ON" uv pip install --force-reinstall --no-cache-dir llama-cpp-python`.
+Ob der vorhandene Build auslagern kann, sagt `rag plan` beim Generator und die
+Modelle-Seite der Oberfläche; wo es nicht geht, steht dort `cpu` samt Grund
+statt einer GPU-Zusage, die nicht eingelöst wird.
 
 ## Verwendung
 
@@ -45,6 +54,12 @@ rag ingest datei.pdf --force     # auch unverändert neu einlesen
 rag status                    # was liegt im Index
 rag search "Wie lang ist die Kündigungsfrist?"
 rag search "Löschfristen" -n 10 --full
+
+rag pull                      # GGUF des geplanten Generators holen
+rag ask "Wie lang ist die Kündigungsfrist und was gilt bei Verzug?"
+rag ask "Löschfristen?" -k 3 --no-rerank
+
+rag gui                       # Oberfläche auf http://127.0.0.1:8080
 ```
 
 Ergebnisse werden 24 h in `~/.cache/local-rag/` gecacht; ein
@@ -258,6 +273,78 @@ Hochgerechnet auf 1000 Seiten ohne Scans: ~13 Minuten Extraktion plus ~18
 Minuten Embedding. Das Embedding ist damit die teurere Hälfte des Ingests —
 auf einem Rechner mit sichtbarer GPU der erste Hebel.
 
+## Reranking
+
+Die Vektorsuche vergleicht zwei Vektoren, die unabhängig voneinander entstanden
+sind — Anfrage und Chunk haben sich beim Embedden nie gesehen. Ein Cross-Encoder
+liest beide zusammen und kann deshalb beurteilen, was ein Bi-Encoder nur
+schätzen kann: ob dieser Chunk *diese* Frage beantwortet. Der Preis ist
+Rechenzeit pro Paar statt einmal pro Chunk. Deshalb die Arbeitsteilung: die
+Vektorsuche holt breit (30 Kandidaten), der Reranker ordnet und schneidet auf
+das, was in den Prompt passt (5).
+
+Abschaltbar, und das ist keine Bequemlichkeit: auf CPU verdoppelt Reranking die
+Query-Latenz. `platforms.toml` schaltet es in der Klasse `cpu_only` aus.
+
+**Die Relevanzschwelle ist ein echter Kompromiss.** Bei einer Frage zur
+Kündigungsfrist bekamen die zwei treffenden Chunks 0,28 und 0,06, drei
+sachfremde 0,005 bis 0,000 — und landeten trotzdem im Prompt, weil `top_k` sie
+auffüllte. `min_rerank_score` wirft sie heraus. Umgekehrt gemessen: bei 0,01
+fiel eine Stelle heraus, die die Antwort enthalten hätte, und das Modell sagte
+korrekt „steht nicht in den Quellen" — die Information war im Index, nur nicht
+im Prompt. Die Vorgabe ist deshalb 0 (nicht filtern), und die Oberfläche zeigt
+die Punktzahlen an, damit der Wert an eigenen Dokumenten gewählt werden kann.
+
+## Antwort
+
+Der Prompt ist der eigentliche Inhalt von `rag/generate.py`, nicht das Laden.
+Drei Festlegungen:
+
+- **Quellen sind numeriert, und die Nummer gehört in den Text.** Ohne
+  Zitierpflicht mischt das Modell Kontextwissen mit Vorwissen, und niemand kann
+  hinterher trennen, was woher kam.
+- **Nichtwissen ist eine erlaubte Antwort.** Ein RAG-System, das bei fehlendem
+  Kontext rät, ist schlimmer als eines das schweigt — der plausiblen Erfindung
+  glaubt man. Am Testkorpus verifiziert: auf eine Frage, deren Antwort nicht in
+  den mitgegebenen Quellen stand, kam „ist in den bereitgestellten Quellen
+  nicht angegeben" statt einer Erfindung.
+- **Deutsch, ausdrücklich.** Qwen3 antwortet sonst gern englisch auf eine
+  deutsche Frage, sobald der Kontext englische Fachbegriffe enthält.
+
+Die Frage steht *nach* den Quellen: bei langem Kontext gewichten Modelle das
+Ende stärker, und die Frage soll nicht in der Mitte der Quellen verschwinden.
+Vom Kontextfenster gehen nur 60 % an Quellen — ein überlaufendes Fenster kostet
+die Antwort, nicht bloß eine Quelle.
+
+## Oberfläche
+
+`rag gui` startet einen lokalen Server (NiceGUI, nur auf localhost) mit vier
+Seiten: Fragen, Dokumente, Modelle, Einstellungen.
+
+Der ganze Aufwand dort dreht sich um ein Problem: **alles Interessante dauert
+lange.** Ein Ingest läuft Minuten, eine Antwort entsteht mit zwei bis acht
+Token pro Sekunde, der Modell-Scan braucht bis zu drei Minuten, ein
+GGUF-Download mehrere Gigabyte. Nichts davon darf den Browser blockieren, und
+alles muss Fortschritt zeigen — sonst ist es von einem Absturz nicht zu
+unterscheiden. Jede blockierende Arbeit läuft deshalb über `asyncio.to_thread`,
+der Ingest meldet Datei und Phase, die Antwort erscheint Token für Token.
+
+Modelle werden erst geladen, wenn sie gebraucht werden: eine Suche ohne Antwort
+lädt keinen Generator, eine Antwort ohne Reranking keinen Cross-Encoder. In der
+Oberfläche ist das der Unterschied zwischen einem benutzbaren Programm und
+dreißig Sekunden Startbildschirm.
+
+Einstellungen liegen in `~/.config/local-rag/settings.json` — die einzige Datei
+des Projekts, die echte Nutzereingabe enthält und nicht neu erzeugbar ist. Beim
+Laden legt sie sich über die Plattformvorgaben, statt sie zu ersetzen: ein neues
+Feld wirkt mit seinem Vorgabewert, statt an einer alten Datei zu scheitern.
+
+Ein Nutzer, ein Prozess, ein Modell im Speicher. Der Index ist gegen
+Mehrfachzugriff abgesichert (`check_same_thread=False` plus ein Lock im Store),
+weil der Event-Loop ihn für die Kennzahlen öffnet und ein Arbeitsthread darin
+sucht und schreibt — ein Fehler, der in der CLI nie auftritt, weil dort alles
+ein Thread ist.
+
 ## Tests
 
 ```bash
@@ -270,14 +357,47 @@ ersetzt, der aus dem Text deterministische Vektoren ableitet — geprüft wird d
 Steuerung (Dateiauswahl, Idempotenz, Fehlerbehandlung), nicht die
 Retrieval-Qualität.
 
+## Gemessen
+
+Alles auf dieser Maschine (24 logische Kerne, CPU; Torch sieht die AMD-iGPU
+nicht, llama.cpp ist CPU-only gebaut).
+
+| Stufe | Wert |
+|---|---|
+| Extraktion ohne OCR | ~0,8 s pro Seite |
+| Extraktion mit OCR | ~8,5 s pro Seite |
+| Embedding | 1,2 Chunks/s bei ~500 Token |
+| Query-Embedding | 79 ms |
+| Antwort, Ende zu Ende | 19–23 s bei 2,4–2,8 Token/s |
+| Generator laden (4B Q5_K_M) | ~10 s |
+| Ingest, nichts geändert | 1,1 s für drei Dateien, kein Modell geladen |
+
+**Threads nicht hochstellen.** Alle 24 logischen Kerne an llama.cpp zu geben war
+siebenmal langsamer als die Vorgabe: 1,2 gegen 8,3 Token/s. Ursache ist
+SMT-Oversubscription. Die Einstellung steht deshalb auf 0 („llama.cpp
+entscheiden lassen") und die Oberfläche warnt daneben.
+
+Die Antwortlatenz ist damit der teuerste Teil der Kette und der einzige, der
+den Anwender direkt warten lässt. Auf einem Rechner mit sichtbarer GPU liegt
+hier der Hebel — whichllm schätzt für dieses Modell 17,6 Token/s auf der GPU
+gegen die gemessenen 2,4 auf CPU.
+
 ## Nächste Schritte
 
-3. Query: Reranking (bge-reranker-v2-m3) → Prompt → llama-cpp-python
-4. Messen: Latenz pro Stufe, Ingest-Durchsatz, Retrieval-Qualität an echten
-   deutschen Dokumenten
+4. Messen an einem echten Korpus statt an drei Testdokumenten: Retrieval-Güte,
+   sinnvolle Relevanzschwelle, Ingest-Durchsatz über hunderte Seiten
 5. whichllm erweitern: Rollen, MTEB-Adapter, Budget-Allokation
 
 Offen:
+
+- **GPU-Betrieb.** Weder Torch noch llama.cpp sehen hier eine GPU: Torch ist
+  der CUDA-Build (die Radeon 890M bleibt unsichtbar, dafür bräuchte es ROCm),
+  llama-cpp-python wurde ohne Beschleuniger-Flags kompiliert. Beide Stellen
+  melden das jetzt statt still auf CPU zu laufen, aber gelöst ist es nicht.
+- **Hybrid-Retrieval.** bge-m3 liefert neben dem Dense-Vektor auch
+  Sparse-Gewichte; genutzt wird bisher nur der Dense-Teil. Bei Aktenzeichen und
+  Eigennamen wäre die lexikalische Komponente der größere Hebel — es war das
+  ausschlaggebende Argument für dieses Modell.
 
 - **Seitenzahlen pro Chunk.** Docling kennt die Provenance jedes Elements,
   `export_to_markdown()` verliert sie. Für Quellenangaben („Seite 12") müsste

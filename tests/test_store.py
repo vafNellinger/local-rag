@@ -405,3 +405,71 @@ class TestFileHash:
         gross = tmp_path / "gross.bin"
         gross.write_bytes(b"x" * (3 * 1024 * 1024))
         assert len(file_sha256(gross)) == 64
+
+
+class TestThreadSafety:
+    """Der Store wird aus mehreren Threads benutzt.
+
+    In der CLI läuft alles in einem Thread, in der Oberfläche nicht: der
+    Event-Loop öffnet den Index für die Kennzahlen, ein Arbeitsthread sucht
+    und schreibt darin. Ohne check_same_thread=False und den Lock im Store
+    scheitert das mit sqlite3.ProgrammingError — ein Fehler, der in keinem
+    CLI-Test auftaucht.
+    """
+
+    def test_zugriff_aus_fremdem_thread(self, store, tmp_path):
+        import threading
+
+        store.replace_document(
+            tmp_path / "a.md",
+            sha256="1",
+            format="markdown",
+            chunks=chunks("Aus dem Hauptthread"),
+            embeddings=[X],
+        )
+
+        ergebnis: dict = {}
+
+        def im_thread() -> None:
+            try:
+                ergebnis["treffer"] = store.search(X, limit=1)
+                ergebnis["stats"] = store.stats()
+            except Exception as exc:  # noqa: BLE001
+                ergebnis["fehler"] = exc
+
+        worker = threading.Thread(target=im_thread)
+        worker.start()
+        worker.join(timeout=10)
+
+        assert "fehler" not in ergebnis, f"Fremder Thread scheiterte: {ergebnis}"
+        assert len(ergebnis["treffer"]) == 1
+        assert ergebnis["stats"]["documents"] == 1
+
+    def test_schreiben_aus_fremdem_thread(self, store, tmp_path):
+        import threading
+
+        fehler: list[Exception] = []
+
+        def schreiben(nummer: int) -> None:
+            try:
+                store.replace_document(
+                    tmp_path / f"datei{nummer}.md",
+                    sha256=str(nummer),
+                    format="markdown",
+                    chunks=chunks(f"Inhalt {nummer}"),
+                    embeddings=[X],
+                )
+            except Exception as exc:  # noqa: BLE001
+                fehler.append(exc)
+
+        threads = [threading.Thread(target=schreiben, args=(i,)) for i in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not fehler, f"Paralleles Schreiben scheiterte: {fehler}"
+        stats = store.stats()
+        assert stats["documents"] == 4
+        # Der eigentliche Punkt: keine halb geschriebenen Dokumente.
+        assert stats["chunks"] == stats["vectors"] == 4

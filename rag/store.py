@@ -23,6 +23,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+import threading
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -60,6 +61,11 @@ class SearchHit:
     kind: str
     # Cosine-Distanz: 0 bei identischer Richtung, 1 bei Orthogonalität.
     distance: float
+    # Vom Cross-Encoder gesetzt, falls Reranking gelaufen ist. Ein Logit,
+    # keine Wahrscheinlichkeit: die Werte sind untereinander vergleichbar,
+    # aber nicht absolut interpretierbar. Höher heißt relevanter — umgekehrt
+    # zur Distanz oben, wo klein gut ist.
+    rerank_score: float | None = None
 
     @property
     def similarity(self) -> float:
@@ -130,7 +136,13 @@ def read_index_meta(path: str | Path) -> dict[str, str]:
 
 
 def _connect(path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(path)
+    # check_same_thread=False, weil die Oberfläche den Store aus mehreren
+    # Threads benutzt: der Event-Loop öffnet ihn für die Kennzahlen, ein
+    # Arbeitsthread sucht und schreibt darin. Pythons Thread-Prüfung würde das
+    # verbieten, obwohl SQLite selbst es kann — die Serialisierung übernimmt
+    # der Lock in IndexStore. Ohne beides gibt es einen ProgrammingError, der
+    # in der CLI nie auftritt, weil dort alles ein Thread ist.
+    connection = sqlite3.connect(path, check_same_thread=False)
     connection.row_factory = sqlite3.Row
     try:
         import sqlite_vec
@@ -174,6 +186,11 @@ class IndexStore:
         self.dimensions = dimensions
         self.profile = profile
         self._connection: sqlite3.Connection | None = None
+        # Reentrant, weil replace_document intern document_record und
+        # _delete_document aufruft. Der Lock sitzt hier und nicht im Aufrufer:
+        # ein Store, dessen Thread-Sicherheit von der Disziplin der Oberfläche
+        # abhängt, ist keiner.
+        self._lock = threading.RLock()
 
     # ─── Lebenszyklus ────────────────────────────────────────────────────────
 
@@ -184,16 +201,18 @@ class IndexStore:
         self.close()
 
     def open(self) -> IndexStore:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = _connect(self.path)
-        self._create_schema()
-        self._check_compatibility()
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._connection = _connect(self.path)
+            self._create_schema()
+            self._check_compatibility()
         return self
 
     def close(self) -> None:
-        if self._connection is not None:
-            self._connection.close()
-            self._connection = None
+        with self._lock:
+            if self._connection is not None:
+                self._connection.close()
+                self._connection = None
 
     @property
     def connection(self) -> sqlite3.Connection:
@@ -316,10 +335,11 @@ class IndexStore:
 
     def document_record(self, path: str | Path) -> DocumentRecord | None:
         """Was der Index über diese Datei weiß, oder None."""
-        row = self.connection.execute(
-            "SELECT id, path, sha256, chunk_count FROM documents WHERE path = ?",
-            (self._normalize(path),),
-        ).fetchone()
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT id, path, sha256, chunk_count FROM documents WHERE path = ?",
+                (self._normalize(path),),
+            ).fetchone()
         if row is None:
             return None
         return DocumentRecord(
@@ -377,11 +397,10 @@ class IndexStore:
         import sqlite_vec
 
         normalized = self._normalize(path)
-        db = self.connection
 
         # Eine Transaktion über Löschen und Neuschreiben: bricht der Ingest
         # mitten im Dokument ab, bleibt der alte Stand statt einer halben Datei.
-        with db:
+        with self._lock, self.connection as db:
             if existing := self.document_record(normalized):
                 self._delete_document(existing.id)
 
@@ -444,7 +463,7 @@ class IndexStore:
         """
         keep = {self._normalize(p) for p in present}
         removed: list[str] = []
-        with self.connection:
+        with self._lock, self.connection:
             for row in self.connection.execute(
                 "SELECT id, path FROM documents"
             ).fetchall():
@@ -468,18 +487,19 @@ class IndexStore:
 
         import sqlite_vec
 
-        rows = self.connection.execute(
-            """
-            SELECT v.chunk_id, v.distance, c.ordinal, c.text, c.heading_path,
-                   c.kind, d.path
-            FROM chunk_vectors AS v
-            JOIN chunks AS c ON c.id = v.chunk_id
-            JOIN documents AS d ON d.id = c.document_id
-            WHERE v.embedding MATCH ? AND k = ?
-            ORDER BY v.distance
-            """,
-            (sqlite_vec.serialize_float32(list(vector)), limit),
-        ).fetchall()
+        with self._lock:
+            rows = self.connection.execute(
+                """
+                SELECT v.chunk_id, v.distance, c.ordinal, c.text, c.heading_path,
+                       c.kind, d.path
+                FROM chunk_vectors AS v
+                JOIN chunks AS c ON c.id = v.chunk_id
+                JOIN documents AS d ON d.id = c.document_id
+                WHERE v.embedding MATCH ? AND k = ?
+                ORDER BY v.distance
+                """,
+                (sqlite_vec.serialize_float32(list(vector)), limit),
+            ).fetchall()
 
         return [
             SearchHit(
@@ -496,13 +516,14 @@ class IndexStore:
 
     def stats(self) -> dict[str, int | str]:
         """Kennzahlen für die Anzeige."""
-        db = self.connection
-        documents = db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
-        chunks = db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        vectors = db.execute("SELECT COUNT(*) FROM chunk_vectors").fetchone()[0]
-        tokens = db.execute(
-            "SELECT COALESCE(SUM(token_count), 0) FROM chunks"
-        ).fetchone()[0]
+        with self._lock:
+            db = self.connection
+            documents = db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+            chunks = db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            vectors = db.execute("SELECT COUNT(*) FROM chunk_vectors").fetchone()[0]
+            tokens = db.execute(
+                "SELECT COALESCE(SUM(token_count), 0) FROM chunks"
+            ).fetchone()[0]
         return {
             "documents": documents,
             "chunks": chunks,
@@ -515,6 +536,10 @@ class IndexStore:
         }
 
     def documents(self) -> list[DocumentRecord]:
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT id, path, sha256, chunk_count FROM documents ORDER BY path"
+            ).fetchall()
         return [
             DocumentRecord(
                 id=row["id"],
@@ -522,9 +547,7 @@ class IndexStore:
                 sha256=row["sha256"],
                 chunk_count=row["chunk_count"],
             )
-            for row in self.connection.execute(
-                "SELECT id, path, sha256, chunk_count FROM documents ORDER BY path"
-            )
+            for row in rows
         ]
 
     @staticmethod
