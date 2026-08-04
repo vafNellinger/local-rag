@@ -169,3 +169,31 @@ class TestEstimateTokens:
 
     def test_waechst_mit_der_laenge(self):
         assert estimate_tokens("Wort " * 100) > estimate_tokens("Wort")
+
+
+class TestGpuLayersWarnzeitpunkt:
+    """Die Warnung gehört ans Laden, nicht ans Anlegen.
+
+    Sie erschien sonst mitten im Ingest, wo überhaupt nichts generiert wird —
+    im Protokoll sah das aus, als würde der Generator dort gebraucht.
+    """
+
+    def test_konstruktor_warnt_nicht(self, tmp_path, caplog):
+        from rag.generate import Generator
+
+        with caplog.at_level("WARNING"):
+            generator = Generator(tmp_path / "gibtsnicht.gguf", gpu_layers=-1)
+        assert generator.requested_gpu_layers == -1
+        assert not caplog.records
+
+    def test_konstruktor_laedt_nichts(self, tmp_path):
+        from rag.generate import Generator
+
+        assert not Generator(tmp_path / "x.gguf", gpu_layers=-1).is_loaded
+
+    def test_fehlende_datei_meldet_klar(self, tmp_path):
+        from rag.generate import GenerationError, Generator
+
+        generator = Generator(tmp_path / "gibtsnicht.gguf")
+        with pytest.raises(GenerationError, match="nicht gefunden"):
+            generator.model

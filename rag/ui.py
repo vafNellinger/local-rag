@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import shutil
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -52,6 +51,17 @@ logger = logging.getLogger(__name__)
 # müssen sie einen dauerhaften Ort haben — ein Temp-Verzeichnis wäre nach dem
 # nächsten Neustart weg und der Index zeigte ins Leere.
 UPLOAD_DIR = Path.home() / ".local" / "share" / "local-rag" / "dokumente"
+
+# Wohin das Protokoll geschrieben wird. Eine Oberfläche braucht das dringender
+# als ein CLI-Befehl: dort steht der Traceback im Terminal, hier verschwindet
+# er, sobald die Meldung im Browser weggeklickt ist.
+LOG_PATH = Path.home() / ".cache" / "local-rag" / "gui.log"
+
+# Ab welcher Größe das Protokoll umgewälzt wird, und wie viele Generationen
+# behalten werden. Klein gehalten: interessant ist der letzte Fehler, nicht
+# die Geschichte.
+LOG_MAX_BYTES = 2 * 1024 * 1024
+LOG_BACKUPS = 2
 
 ERRORS = (
     PipelineError,
@@ -109,7 +119,10 @@ async def _in_thread(function, *args, **kwargs):
 
 
 def _notify_error(exc: Exception) -> None:
-    logger.debug("Fehler in der Oberfläche", exc_info=True)
+    # exception statt debug: in der Oberfläche ist der Fehler sonst nur als
+    # Kurztext im Browser sichtbar und nirgends nachlesbar. Genau das machte
+    # einen fehlgeschlagenen Upload unauffindbar.
+    logger.exception("Fehler in der Oberfläche: %s", exc)
     ui.notify(str(exc), type="negative", multi_line=True, close_button="ok")
 
 
@@ -409,18 +422,49 @@ def page_documents() -> None:
     ui.timer(0.1, refresh_documents, once=True)
 
 
-def _handle_upload(event, status_label) -> None:
-    """Hochgeladene Datei an ihren dauerhaften Ort schreiben."""
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    target = UPLOAD_DIR / Path(event.name).name
-    try:
-        with open(target, "wb") as handle:
-            shutil.copyfileobj(event.content, handle)
-    except OSError as exc:
-        status_label.text = f"Fehler bei {event.name}: {exc}"
+async def _handle_upload(event, status_label) -> None:
+    """Hochgeladene Datei an ihren dauerhaften Ort schreiben.
+
+    ``event.file`` ist ein ``FileUpload`` mit ``name`` und einem
+    **asynchronen** ``save()`` — deshalb ist dieser Handler eine Coroutine.
+    Eine frühere Fassung griff auf ``event.name`` und ``event.content`` zu,
+    was einer älteren NiceGUI-Schnittstelle entsprach und mit
+    ``AttributeError`` scheiterte.
+    """
+    upload = event.file
+    # basename gegen Pfadanteile im Dateinamen: ein hochgeladenes
+    # "../../.bashrc" darf nicht aus dem Zielverzeichnis herausführen.
+    name = Path(upload.name).name
+    if not name:
+        status_label.text = "Datei ohne Namen — übersprungen"
         return
+
+    suffix = Path(name).suffix.lower()
+    if suffix not in SUPPORTED_SUFFIXES:
+        # Das accept-Attribut im Browser ist nur ein Vorschlag; abgelehnt wird
+        # hier, damit keine Datei im Zielverzeichnis landet, die der Ingest
+        # anschließend als Fehler melden müsste.
+        status_label.text = (
+            f"{name}: Format {suffix or '(ohne Endung)'} wird nicht "
+            f"unterstützt. Möglich: {', '.join(sorted(SUPPORTED_SUFFIXES))}"
+        )
+        logger.warning("Upload abgelehnt: %s", name)
+        return
+
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    target = UPLOAD_DIR / name
+    try:
+        await upload.save(target)
+    except OSError as exc:
+        logger.exception("Upload von %s fehlgeschlagen", name)
+        status_label.text = f"Fehler bei {name}: {exc}"
+        return
+
+    size_kb = target.stat().st_size / 1024
+    logger.info("Upload gespeichert: %s (%.1f KB)", target, size_kb)
     status_label.text = (
-        f"{target.name} gespeichert — mit „Hochgeladene aufnehmen“ indizieren"
+        f"{name} gespeichert ({size_kb:.0f} KB) — "
+        "mit „Hochgeladene aufnehmen“ indizieren"
     )
 
 
@@ -816,15 +860,65 @@ def _toggle_dark(enabled: bool) -> None:
     mode.enable() if enabled else mode.disable()
 
 
+def setup_logging(*, verbose: bool = False, log_path: Path | None = None) -> Path:
+    """Protokoll in eine Datei und auf die Konsole legen.
+
+    Existiert, weil ein Fehler in der Oberfläche sonst spurlos verschwindet:
+    im Browser steht eine Kurzmeldung, der Traceback landet nirgends. Ein
+    fehlgeschlagener Upload war deshalb nicht nachvollziehbar, ohne den
+    Serverprozess selbst zu beobachten.
+    """
+    from logging.handlers import RotatingFileHandler
+
+    target = log_path or LOG_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    root = logging.getLogger("rag")
+    root.setLevel(logging.DEBUG if verbose else logging.INFO)
+    # Doppelte Handler vermeiden, falls run() im selben Prozess erneut läuft.
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+
+    file_handler = RotatingFileHandler(
+        target, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS, encoding="utf-8"
+    )
+    file_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    root.addHandler(file_handler)
+
+    console = logging.StreamHandler()
+    console.setFormatter(logging.Formatter("%(levelname)-8s %(name)s: %(message)s"))
+    root.addHandler(console)
+
+    # Unbehandelte Fehler in NiceGUIs Event-Behandlung landen in dessen
+    # Logger, nicht in unserem — ohne diese Zeile stünde der Traceback eines
+    # abgestürzten Handlers nicht in der Datei.
+    nicegui_logger = logging.getLogger("nicegui")
+    nicegui_logger.setLevel(logging.INFO)
+    for handler in (file_handler, console):
+        if handler not in nicegui_logger.handlers:
+            nicegui_logger.addHandler(handler)
+
+    return target
+
+
 def run(
     *,
     index_path: Path | None = None,
     host: str = "127.0.0.1",
     port: int = 8080,
     open_browser: bool = True,
+    verbose: bool = False,
 ) -> None:
     """Oberfläche starten. Blockiert bis zum Beenden."""
     global state
+    log_file = setup_logging(verbose=verbose)
+    logger.info("Oberfläche startet auf http://%s:%d", host, port)
+    logger.info("Protokoll: %s", log_file)
     state = State(index_path)
 
     nicegui_app.on_shutdown(lambda: state.pipeline.close() if state else None)

@@ -938,17 +938,25 @@ def gui(
     no_browser: bool = typer.Option(
         False, "--no-browser", help="Browser nicht automatisch öffnen"
     ),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Debug-Ausgabe"),
 ) -> None:
     """Starte die grafische Oberfläche."""
     try:
-        from rag.ui import run
+        from rag.ui import LOG_PATH, run
     except ImportError as exc:
         console.print(
             f"[red]Fehler:[/] NiceGUI fehlt: uv pip install -e '.[gui]' ({exc})"
         )
         raise typer.Exit(1) from exc
 
-    run(index_path=index, host=host, port=port, open_browser=not no_browser)
+    console.print(f"[dim]Protokoll:[/] {LOG_PATH}")
+    run(
+        index_path=index,
+        host=host,
+        port=port,
+        open_browser=not no_browser,
+        verbose=verbose,
+    )
 
 
 if __name__ == "__main__":

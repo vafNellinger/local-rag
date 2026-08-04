@@ -264,7 +264,11 @@ class Generator:
     ) -> None:
         self.model_path = Path(model_path).expanduser()
         self.context_length = context_length
-        self.gpu_layers = resolve_gpu_layers(gpu_layers)
+        # Roh übernehmen und erst beim Laden auflösen: die Prüfung warnt, und
+        # eine Warnung über die Generierung darf nicht schon dann erscheinen,
+        # wenn das Objekt angelegt wird — sie tauchte sonst mitten im Ingest
+        # auf, wo gar nichts generiert wird.
+        self.requested_gpu_layers = gpu_layers
         self.threads = threads
         self.seed = seed
         self._model = None
@@ -308,6 +312,7 @@ class Generator:
                 "'rag pull' lädt das vom Plan genannte Modell herunter"
             )
 
+        self.gpu_layers = resolve_gpu_layers(self.requested_gpu_layers)
         logger.debug(
             "Lade %s (Kontext %d, GPU-Layer %d)",
             self.model_path.name,

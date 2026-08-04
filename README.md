@@ -345,6 +345,22 @@ weil der Event-Loop ihn für die Kennzahlen öffnet und ein Arbeitsthread darin
 sucht und schreibt — ein Fehler, der in der CLI nie auftritt, weil dort alles
 ein Thread ist.
 
+### Protokoll
+
+`~/.cache/local-rag/gui.log`, umgewälzt bei 2 MB. Eine Oberfläche braucht das
+dringender als ein CLI-Befehl: dort steht der Traceback im Terminal, hier
+verschwindet er, sobald die Meldung im Browser weggeklickt ist. Genau daran
+scheiterte die Fehlersuche beim Upload — der `AttributeError` landete im
+Serverprozess, und ohne eingerichtetes Protokoll war er nirgends nachlesbar.
+`rag gui -v` schaltet auf Debug-Stufe.
+
+Hochgeladene Dateien landen in `~/.local/share/local-rag/dokumente`. Sie
+brauchen einen dauerhaften Ort, weil der Index auf Pfade verweist — aus einem
+Temp-Verzeichnis zeigte er nach dem nächsten Neustart ins Leere. Das Format
+wird serverseitig geprüft: das `accept`-Attribut im Browser ist nur ein
+Vorschlag, und Pfadanteile im Dateinamen werden entfernt, damit ein
+hochgeladenes `../../.bashrc` nicht aus dem Zielverzeichnis herausführt.
+
 ## Tests
 
 ```bash
