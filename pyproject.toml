@@ -46,6 +46,14 @@ testdaten = [
 [project.scripts]
 rag = "rag.cli:app"
 
+[tool.pytest.ini_options]
+# "slow" sind Tests, die echte Modelle laufen lassen — vor allem OCR, das
+# allein rund 25 Sekunden kostet. Sie laufen standardmäßig mit, weil sie
+# echte Fehler finden; für einen schnellen Durchgang: pytest -m "not slow".
+markers = [
+    "slow: braucht ein echtes Modell (OCR, Embedding) und dauert Sekunden",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

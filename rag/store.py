@@ -135,6 +135,34 @@ def read_index_meta(path: str | Path) -> dict[str, str]:
     return {str(key): str(value) for key, value in rows}
 
 
+def read_index_documents(path: str | Path) -> list[str]:
+    """Die Dokumentpfade eines Index lesen, ohne ihn zu öffnen.
+
+    Gegenstück zu ``read_index_meta`` und für denselben Fall gebaut: beim
+    Wechsel des Embedding-Modells muss der Index verworfen werden, aber die
+    Liste der aufgenommenen Dateien soll erhalten bleiben, damit der Neuaufbau
+    nicht von Hand zusammengesucht werden muss. Ein Index mit fremdem Modell
+    lässt sich nicht öffnen — deshalb reines SQLite ohne Kompatibilitätsprüfung
+    und ohne sqlite-vec.
+    """
+    file_path = Path(path).expanduser()
+    if not file_path.exists():
+        return []
+    try:
+        connection = sqlite3.connect(f"file:{file_path}?mode=ro", uri=True)
+    except sqlite3.OperationalError:
+        return []
+    try:
+        rows = connection.execute(
+            "SELECT path FROM documents ORDER BY path"
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return []
+    finally:
+        connection.close()
+    return [str(row[0]) for row in rows]
+
+
 def _connect(path: Path) -> sqlite3.Connection:
     # check_same_thread=False, weil die Oberfläche den Store aus mehreren
     # Threads benutzt: der Event-Loop öffnet ihn für die Kennzahlen, ein

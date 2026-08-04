@@ -273,6 +273,53 @@ Hochgerechnet auf 1000 Seiten ohne Scans: ~13 Minuten Extraktion plus ~18
 Minuten Embedding. Das Embedding ist damit die teurere Hälfte des Ingests —
 auf einem Rechner mit sichtbarer GPU der erste Hebel.
 
+## Ein anderes Embedding-Modell verwenden
+
+Neues Profil in `config/platforms.toml` anlegen:
+
+```toml
+[embedder.neu]
+model_id = "org/besseres-modell"
+dimensions = 1024
+max_seq_length = 8192
+vram_estimate_mb = 1100
+query_prefix = ""       # falls das Modell Instruktionspräfixe braucht,
+passage_prefix = ""     # hier eintragen — sonst sinkt die Qualität still
+```
+
+Dann umschalten und neu aufbauen:
+
+```bash
+rag reindex --profile neu              # Dateiliste kommt aus dem alten Index
+rag eval --index eval.db               # und jetzt belegen, ob es besser ist
+```
+
+In der Oberfläche: *Einstellungen → Embedder → Profil*, speichern, dann
+„Index jetzt neu aufbauen".
+
+**Der Index kennt sein Modell und lehnt ein fremdes ab.** Zwei Modelle im
+selben Vektorraum liefern weiter Treffer, nur falsche. Ein Wechsel verlangt
+deshalb zwingend einen Neuaufbau — es gibt keinen Weg, das zu umgehen, und das
+ist Absicht.
+
+**Die Extraktion wird dabei nicht wiederholt.** Das extrahierte Markdown liegt
+in `~/.cache/local-rag/extract/`, geschlüsselt über den Dateiinhalt, den
+OCR-Modus, die OCR-Sprachen und die Docling-Version. Bei einem Modellwechsel
+ändert sich nur das Embedding, also wird nur das neu berechnet. Gemessen an
+zwei Dokumenten, von denen eines gescannt ist: **13,1 s gegen 7,1 s, also 46 %
+gespart** — die Texterkennung lief nicht erneut. Ohne Scans ist der Gewinn
+kleiner (rund ein Drittel), mit vielen Scans größer.
+
+Der Cache liegt ausdrücklich *außerhalb* des Index. Läge er darin, wäre er
+genau dann unerreichbar, wenn man ihn braucht: ein Index mit fremdem Modell
+lässt sich nicht öffnen. `rag reindex --clear-cache` erzwingt echte
+Neuextraktion, etwa nach einem Docling-Update, das man mitnehmen will.
+
+Die Einstellung wirkt **nicht sofort** — bis zum Neuaufbau gilt weiter das
+Modell des Index. Das wird angezeigt und protokolliert, statt still zu
+geschehen: die Oberfläche meldet beim Speichern „gespeichert, aber noch nicht
+wirksam" und zeigt eine Karte mit dem Neuaufbau-Knopf.
+
 ## Reranking
 
 Die Vektorsuche vergleicht zwei Vektoren, die unabhängig voneinander entstanden
@@ -366,6 +413,17 @@ hochgeladenes `../../.bashrc` nicht aus dem Zielverzeichnis herausführt.
 ```bash
 uv pip install -e ".[dev]" && pytest -q
 ```
+
+Für einen schnellen Durchgang: `pytest -q -m "not slow"` (3,5 s gegen 31 s).
+Als `slow` markiert sind die Tests, die echte Modelle laufen lassen — OCR
+allein kostet 25 Sekunden. Sie laufen standardmäßig mit, weil sie echte Fehler
+finden.
+
+`tests/conftest.py` biegt alle Schreibziele im Heimverzeichnis auf ein
+temporäres Verzeichnis um. Das ist ein Sicherheitsnetz, keine Vorsichtsmaßnahme
+auf Verdacht: nach dem Einbau des Extraktions-Caches lagen sechs Testeinträge
+in `~/.cache/local-rag/extract/`, weil nur die Tests des neuen Moduls den Pfad
+umgelenkt hatten.
 
 Getestet wird die Entscheidungslogik: ohne whichllm-Aufruf, ohne Netz und ohne
 Modell-Download. Der Embedder wird in den Ingest-Tests durch einen Stub

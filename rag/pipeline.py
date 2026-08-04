@@ -53,6 +53,7 @@ from rag.store import (
     IndexStore,
     SearchHit,
     StoreError,
+    read_index_documents,
     read_index_meta,
 )
 
@@ -320,22 +321,89 @@ class RagPipeline:
             )
         return self._embedder
 
+    def profile_conflict(self) -> tuple[str, str] | None:
+        """``(im Index, gewünscht)``, falls beide auseinanderlaufen.
+
+        Existiert, weil der Index gegen die Einstellung gewinnt und das nicht
+        stillschweigend passieren darf: wer in der Oberfläche ein anderes
+        Modell wählt und „Gespeichert“ bestätigt bekommt, würde sonst weiter
+        mit dem alten suchen, ohne es zu merken. Ein Wechsel verlangt einen
+        Neuaufbau — ``rebuild_index()`` erledigt ihn.
+        """
+        stored = read_index_meta(self.settings.index_path).get("embedder_profile")
+        if stored and stored != self.settings.embedder_profile:
+            return stored, self.settings.embedder_profile
+        return None
+
     def _effective_embedder_profile(self) -> str:
         """Das Profil des Index gewinnt gegen die Einstellung.
 
         Sonst würde ein Plattformwechsel den bestehenden Index bei der ersten
         Suche unbrauchbar machen — gesucht werden muss mit dem Modell, mit dem
-        indiziert wurde.
+        indiziert wurde. Der Konflikt wird gemeldet und nicht verschwiegen;
+        ``profile_conflict()`` macht ihn für die Oberfläche greifbar.
         """
-        stored = read_index_meta(self.settings.index_path).get("embedder_profile")
-        if stored and stored != self.settings.embedder_profile:
-            logger.debug(
-                "Index verlangt Profil '%s', Einstellung sagt '%s' — Index gewinnt",
+        if conflict := self.profile_conflict():
+            stored, requested = conflict
+            logger.warning(
+                "Index wurde mit Profil '%s' gebaut, eingestellt ist '%s' — "
+                "es gilt '%s'. Für den Wechsel muss der Index neu aufgebaut "
+                "werden.",
                 stored,
-                self.settings.embedder_profile,
+                requested,
+                stored,
             )
             return stored
         return self.settings.embedder_profile
+
+    def rebuild_index(
+        self,
+        *,
+        progress=None,
+        extra_paths: Iterable[str | Path] = (),
+    ) -> IngestReport:
+        """Index mit dem eingestellten Profil neu aufbauen.
+
+        Liest die Dateiliste aus dem alten Index, löscht ihn und nimmt alles
+        erneut auf. Die Extraktion kommt dabei aus dem Cache, sofern die
+        Dateien unverändert sind — genau dafür liegt er außerhalb des Index.
+        Dateien, die inzwischen verschwunden sind, fallen still heraus.
+        """
+        known = [Path(p) for p in read_index_documents(self.settings.index_path)]
+        vorhanden = [p for p in known if p.exists()]
+        if len(vorhanden) < len(known):
+            logger.info(
+                "%d von %d Dateien aus dem alten Index sind verschwunden",
+                len(known) - len(vorhanden),
+                len(known),
+            )
+
+        paths = vorhanden + [Path(p) for p in extra_paths]
+
+        # Store schließen, bevor die Datei verschwindet.
+        if self._store is not None:
+            self._store.close()
+            self._store = None
+        self._embedder = None
+
+        for leftover in self.settings.index_path.parent.glob(
+            self.settings.index_path.name + "*"
+        ):
+            # Auch -wal und -shm: eine zurückbleibende WAL-Datei würde beim
+            # nächsten Öffnen alte Daten wiederherstellen.
+            try:
+                leftover.unlink()
+            except OSError as exc:  # pragma: no cover
+                logger.warning("%s nicht löschbar: %s", leftover, exc)
+
+        logger.info(
+            "Index wird mit Profil '%s' neu aufgebaut, %d Datei(en)",
+            self.settings.embedder_profile,
+            len(paths),
+        )
+        if not paths:
+            return IngestReport()
+        return self.ingest(paths, progress=progress)
 
     @property
     def store(self) -> IndexStore:

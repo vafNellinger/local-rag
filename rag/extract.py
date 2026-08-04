@@ -18,6 +18,8 @@ digitalem Rest ist der Normalfall. Die Entscheidung fällt deshalb pro Seite.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
 import unicodedata
@@ -65,6 +67,23 @@ MIN_SCAN_IMAGE_PIXELS = 100_000
 MAX_XOBJECT_DEPTH = 2
 
 SUPPORTED_SUFFIXES = {".pdf", ".docx", ".md", ".markdown", ".txt", ".text"}
+
+# Wohin extrahiertes Markdown gelegt wird, damit ein zweiter Durchgang die
+# teure Stufe überspringen kann.
+#
+# Der Cache liegt ausdrücklich *außerhalb* des Index. Der Anlass ist ein
+# Wechsel des Embedding-Modells: dabei wird der Index verworfen und neu
+# gebaut, das Extraktionsergebnis bleibt aber identisch. Läge der Text im
+# Index, wäre er genau dann unerreichbar, wenn man ihn braucht — ein Index mit
+# fremdem Modell lässt sich nicht öffnen.
+#
+# Gemessen am Testkorpus macht die Extraktion ein Drittel des Ingests aus, bei
+# 10 % gescannten Seiten über die Hälfte.
+EXTRACT_CACHE_DIR = Path.home() / ".cache" / "local-rag" / "extract"
+
+# Hochzählen, wenn sich das Format der Cache-Einträge ändert. Alte Einträge
+# werden dann ignoriert statt falsch gelesen.
+EXTRACT_CACHE_VERSION = 1
 
 # Formate, die eine Konvertierung brauchen, bevor wir sie lesen können.
 # Explizit benannt, damit die Fehlermeldung den Weg nennt statt nur "geht nicht".
@@ -424,23 +443,153 @@ def _get_converter(*, ocr: bool, ocr_langs: tuple[str, ...]):
     return converter
 
 
+def _file_hash(path: Path) -> str:
+    """Hash über den Dateiinhalt, als Cache-Schlüssel.
+
+    Eigene Kopie und nicht ``store.file_sha256``: die Extraktion soll den
+    Index nicht kennen. Inhalt statt mtime, weil Kopieren und Auspacken die
+    mtime neu setzen, ohne dass sich etwas geändert hat.
+    """
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while block := handle.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _docling_version() -> str:
+    """Version der Extraktionsbibliothek, als Teil des Cache-Schlüssels.
+
+    Eine neue Docling-Version liefert anderes Layout — ein Cache, der dann
+    alte Ergebnisse zurückgibt, wäre ein stiller Fehler. Nach einem Update
+    wird also neu extrahiert.
+    """
+    try:
+        from importlib.metadata import version
+
+        return version("docling")
+    except Exception:  # pragma: no cover
+        return "unbekannt"
+
+
+def _cache_key(file_hash: str, *, ocr: bool, ocr_langs: tuple[str, ...]) -> str:
+    """Schlüssel eines Cache-Eintrags.
+
+    Der OCR-Modus gehört hinein: dieselbe Datei ergibt mit und ohne
+    Texterkennung ein anderes Markdown, und die Sprachliste beeinflusst das
+    Ergebnis ebenfalls.
+    """
+    parts = [
+        str(EXTRACT_CACHE_VERSION),
+        file_hash,
+        "ocr" if ocr else "kein-ocr",
+        "-".join(ocr_langs),
+        _docling_version(),
+    ]
+    digest = hashlib.sha256("|".join(parts).encode()).hexdigest()
+    return digest[:32]
+
+
+def _cache_path(key: str) -> Path:
+    return EXTRACT_CACHE_DIR / f"{key}.json"
+
+
+def _read_cache(key: str) -> dict | None:
+    path = _cache_path(key)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.debug("Cache-Eintrag %s unlesbar: %s", path.name, exc)
+        return None
+
+
+def _write_cache(key: str, payload: dict) -> None:
+    try:
+        EXTRACT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _cache_path(key).write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+        )
+    except OSError as exc:
+        # Ein nicht schreibbarer Cache darf die Extraktion nicht scheitern
+        # lassen — er ist eine Abkürzung, keine Voraussetzung.
+        logger.warning("Cache konnte nicht geschrieben werden: %s", exc)
+
+
+def clear_extract_cache() -> int:
+    """Alle Cache-Einträge löschen. Gibt die Zahl der entfernten Dateien."""
+    if not EXTRACT_CACHE_DIR.exists():
+        return 0
+    entfernt = 0
+    for entry in EXTRACT_CACHE_DIR.glob("*.json"):
+        try:
+            entry.unlink()
+            entfernt += 1
+        except OSError as exc:  # pragma: no cover
+            logger.debug("%s nicht löschbar: %s", entry, exc)
+    return entfernt
+
+
+def extract_cache_size() -> tuple[int, int]:
+    """(Zahl der Einträge, Bytes) des Extraktions-Caches."""
+    if not EXTRACT_CACHE_DIR.exists():
+        return 0, 0
+    entries = list(EXTRACT_CACHE_DIR.glob("*.json"))
+    return len(entries), sum(e.stat().st_size for e in entries)
+
+
 def convert(
     path: str | Path,
     *,
     ocr: bool | None = None,
     ocr_langs: tuple[str, ...] = DEFAULT_OCR_LANGS,
+    use_cache: bool = True,
+    file_hash: str | None = None,
 ) -> ConvertedDocument:
     """Extrahiere ein Dokument als strukturiertes Markdown.
 
     ``ocr=None`` entscheidet automatisch über ``probe()``: OCR läuft nur, wenn
     mindestens eine Seite als Scan erkannt wurde. Das ist der Unterschied
     zwischen 29 Minuten und 2,4 Stunden auf 1000 gemischten Seiten.
+
+    ``use_cache`` überspringt die Extraktion, wenn dieselbe Datei mit
+    denselben OCR-Einstellungen schon einmal verarbeitet wurde. ``file_hash``
+    kann übergeben werden, wenn der Aufrufer ihn ohnehin gebildet hat — der
+    Ingest tut das für die Änderungserkennung.
     """
     file_path = Path(path).expanduser()
+
+    # probe() läuft vor der Cache-Prüfung, obwohl der Cache sie ersetzen
+    # könnte: erst danach steht der OCR-Modus fest, und ohne ihn ist der
+    # Schlüssel nicht eindeutig. Ein früherer Lauf mit --no-ocr auf einer
+    # Scan-Datei würde sonst sein leeres Ergebnis für einen Lauf mit
+    # automatischer Erkennung liefern. Die Voranalyse kostet ~0,05 s.
     analysis = probe(file_path)
 
     if ocr is None:
         ocr = bool(analysis.pages_needing_ocr)
+
+    cache_key: str | None = None
+    if use_cache:
+        try:
+            cache_key = file_hash or _file_hash(file_path)
+        except OSError as exc:
+            logger.debug("Hash für %s nicht bildbar: %s", file_path, exc)
+        if cache_key:
+            key = _cache_key(cache_key, ocr=ocr, ocr_langs=ocr_langs)
+            if cached := _read_cache(key):
+                logger.debug("Extraktion aus dem Cache: %s", file_path.name)
+                return ConvertedDocument(
+                    path=file_path,
+                    format=cached["format"],
+                    markdown=cached["markdown"],
+                    ocr_used=cached["ocr_used"],
+                    page_count=cached["page_count"],
+                    duration_seconds=0.0,
+                    warnings=list(cached.get("warnings", []))
+                    + ["aus dem Extraktions-Cache"],
+                )
 
     warnings = list(analysis.warnings)
     if analysis.sparse_pages:
@@ -454,8 +603,10 @@ def convert(
     suffix = file_path.suffix.lower()
     if suffix not in DOCLING_SUFFIXES:
         # Markdown und Text sind schon Text; Docling brächte hier nichts
-        # außer Ladezeit.
-        return ConvertedDocument(
+        # außer Ladezeit. Gecacht wird trotzdem — der Gewinn ist bei diesen
+        # Formaten gering, aber ein Sonderfall im Cache wäre eine Fehlerquelle
+        # mehr als die paar Kilobyte wert.
+        document = ConvertedDocument(
             path=file_path,
             format=analysis.format,
             markdown=analysis.text,
@@ -464,6 +615,8 @@ def convert(
             duration_seconds=time.time() - started,
             warnings=warnings,
         )
+        _store_in_cache(document, cache_key, ocr=False, ocr_langs=ocr_langs)
+        return document
 
     converter = _get_converter(ocr=ocr, ocr_langs=ocr_langs)
     try:
@@ -483,7 +636,7 @@ def convert(
             "Layout-Analyse"
         )
 
-    return ConvertedDocument(
+    document = ConvertedDocument(
         path=file_path,
         format=analysis.format,
         markdown=markdown,
@@ -491,4 +644,32 @@ def convert(
         page_count=len(analysis.pages),
         duration_seconds=duration,
         warnings=warnings,
+    )
+    _store_in_cache(document, cache_key, ocr=ocr, ocr_langs=ocr_langs)
+    return document
+
+
+def _store_in_cache(
+    document: ConvertedDocument,
+    file_hash: str | None,
+    *,
+    ocr: bool,
+    ocr_langs: tuple[str, ...],
+) -> None:
+    """Ergebnis für einen späteren Lauf ablegen.
+
+    ``file_hash`` ist None, wenn der Cache abgeschaltet war oder der Hash sich
+    nicht bilden ließ — dann wird nichts geschrieben.
+    """
+    if not file_hash:
+        return
+    _write_cache(
+        _cache_key(file_hash, ocr=ocr, ocr_langs=ocr_langs),
+        {
+            "format": document.format,
+            "markdown": document.markdown,
+            "ocr_used": document.ocr_used,
+            "page_count": document.page_count,
+            "warnings": document.warnings,
+        },
     )

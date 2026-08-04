@@ -206,7 +206,9 @@ def _ingest_one(
 
     announce("extrahieren")
     try:
-        document = convert(path, ocr=ocr)
+        # Der Hash liegt schon vor — durchgeben, damit der Extraktions-Cache
+        # ihn nicht ein zweites Mal über die Datei bilden muss.
+        document = convert(path, ocr=ocr, file_hash=digest)
     except ExtractionError as exc:
         return FileResult(path, STATUS_FAILED, error=str(exc))
     except Exception as exc:  # pragma: no cover

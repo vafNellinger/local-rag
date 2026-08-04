@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -27,16 +28,23 @@ from rag.evaluate import (
     evaluate,
     load_gold,
 )
-from rag.extract import ExtractionError, convert, probe
+from rag.extract import (
+    ExtractionError,
+    clear_extract_cache,
+    convert,
+    extract_cache_size,
+    probe,
+)
 from rag.generate import NO_CONTEXT_ANSWER, GenerationError, gguf_path
 from rag.ingest import IngestReport, ingest_paths, search_index
-from rag.pipeline import PipelineError, RagPipeline, Settings
+from rag.pipeline import SETTINGS_PATH, PipelineError, RagPipeline, Settings
 from rag.rerank import RerankError
 from rag.resolve import PipelinePlan, ResolutionError, resolve_pipeline
 from rag.store import (
     DEFAULT_INDEX_NAME,
     IndexStore,
     StoreError,
+    read_index_documents,
     read_index_meta,
 )
 
@@ -45,6 +53,7 @@ app = typer.Typer(
     help="Lokales RAG mit plattformabhängiger Modellauswahl.",
 )
 console = Console()
+logger = logging.getLogger(__name__)
 
 _GIB = 1024**3
 
@@ -57,6 +66,27 @@ DEFAULT_INDEX_PATH = Path.home() / ".cache" / "local-rag" / DEFAULT_INDEX_NAME
 def main() -> None:
     """Ohne diesen Callback macht Typer den einzigen Befehl zum Root-Befehl,
     was ``rag plan`` bricht, sobald ``ingest`` und ``ask`` dazukommen."""
+
+
+def _resolve_index(explicit: Path | None) -> Path:
+    """Index-Pfad auflösen: Angabe, dann gespeicherte Einstellung, dann Vorgabe.
+
+    ``--index`` muss ``None`` als Vorgabe haben, damit dieser Vorrang
+    überhaupt feststellbar ist. Mit einem Vorgabewert wäre nicht zu
+    unterscheiden, ob der Anwender ihn genannt hat — und der Vorgabewert würde
+    stets gegen die gespeicherte Einstellung gewinnen. Genau so war der in der
+    Oberfläche eingestellte Pfad nach jedem Neustart wirkungslos.
+    """
+    if explicit is not None:
+        return explicit
+    if SETTINGS_PATH.exists():
+        try:
+            stored = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+            if pfad := stored.get("index_path"):
+                return Path(pfad).expanduser()
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.debug("Einstellungen nicht lesbar: %s", exc)
+    return DEFAULT_INDEX_PATH
 
 
 def _render(plan: PipelinePlan) -> None:
@@ -418,7 +448,9 @@ def _render_ingest(report: IngestReport) -> None:
 @app.command()
 def ingest(
     paths: list[Path] = typer.Argument(..., help="Dateien oder Verzeichnisse"),
-    index: Path = typer.Option(DEFAULT_INDEX_PATH, "--index", help="Index-Datei"),
+    index: Path | None = typer.Option(
+        None, "--index", help="Index-Datei; ohne Angabe aus den Einstellungen"
+    ),
     profile: str | None = typer.Option(
         None,
         "--profile",
@@ -445,6 +477,8 @@ def ingest(
         level=logging.DEBUG if verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",
     )
+
+    index = _resolve_index(index)
 
     try:
         choice = _choose_embedder(index, profile, device)
@@ -491,7 +525,9 @@ def ingest(
 @app.command()
 def search(
     query: str = typer.Argument(..., help="Suchbegriff oder Frage"),
-    index: Path = typer.Option(DEFAULT_INDEX_PATH, "--index", help="Index-Datei"),
+    index: Path | None = typer.Option(
+        None, "--index", help="Index-Datei; ohne Angabe aus den Einstellungen"
+    ),
     profile: str | None = typer.Option(
         None, "--profile", help="Embedder-Profil erzwingen; ohne Angabe aus dem Index"
     ),
@@ -508,6 +544,7 @@ def search(
         format="%(levelname)s %(name)s: %(message)s",
     )
 
+    index = _resolve_index(index)
     if not index.exists():
         console.print(f"[red]Fehler:[/] kein Index unter {index} — erst 'rag ingest'")
         raise typer.Exit(1)
@@ -555,9 +592,12 @@ def search(
 
 @app.command()
 def status(
-    index: Path = typer.Option(DEFAULT_INDEX_PATH, "--index", help="Index-Datei"),
+    index: Path | None = typer.Option(
+        None, "--index", help="Index-Datei; ohne Angabe aus den Einstellungen"
+    ),
 ) -> None:
     """Zeige, was im Index liegt."""
+    index = _resolve_index(index)
     if not index.exists():
         console.print(f"\n  [yellow]kein Index unter[/] {index}\n")
         return
@@ -654,7 +694,9 @@ def pull(
 @app.command()
 def ask(
     question: str = typer.Argument(..., help="Die Frage"),
-    index: Path = typer.Option(DEFAULT_INDEX_PATH, "--index", help="Index-Datei"),
+    index: Path | None = typer.Option(
+        None, "--index", help="Index-Datei; ohne Angabe aus den Einstellungen"
+    ),
     top_k: int = typer.Option(5, "-k", "--top-k", help="Quellen im Prompt"),
     context: int | None = typer.Option(
         None, "--context", help="Kontextfenster in Token"
@@ -674,6 +716,7 @@ def ask(
         format="%(levelname)s %(name)s: %(message)s",
     )
 
+    index = _resolve_index(index)
     if not index.exists():
         console.print(f"[red]Fehler:[/] kein Index unter {index} — erst 'rag ingest'")
         raise typer.Exit(1)
@@ -751,9 +794,107 @@ def ask(
     console.print(f"\n  [dim]{duration:.1f}s[/]\n")
 
 
+@app.command()
+def reindex(
+    index: Path | None = typer.Option(
+        None, "--index", help="Index-Datei; ohne Angabe aus den Einstellungen"
+    ),
+    profile: str | None = typer.Option(
+        None, "--profile", help="Embedder-Profil, mit dem neu gebaut wird"
+    ),
+    clear_cache: bool = typer.Option(
+        False,
+        "--clear-cache",
+        help="Extraktions-Cache vorher leeren (erzwingt echte Neuextraktion)",
+    ),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Debug-Ausgabe"),
+) -> None:
+    """Baue den Index neu auf, etwa nach einem Wechsel des Embedders.
+
+    Die Dateiliste kommt aus dem bestehenden Index. Die Extraktion wird aus
+    dem Cache wiederverwendet, sofern die Dateien unverändert sind — bei einem
+    Modellwechsel ändert sich nur das Embedding.
+    """
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+
+    index = _resolve_index(index)
+    if not index.exists():
+        console.print(f"[red]Fehler:[/] kein Index unter {index} — erst 'rag ingest'")
+        raise typer.Exit(1)
+
+    known = read_index_documents(index)
+    if not known:
+        console.print(f"[yellow]Der Index unter {index} führt keine Dokumente.[/]")
+        raise typer.Exit(1)
+
+    stored = read_index_meta(index)
+    ziel = profile or stored.get("embedder_profile", "default")
+
+    try:
+        config = load_embedder_config(ziel)
+    except EmbeddingError as exc:
+        console.print(f"[red]Fehler:[/] {exc}")
+        raise typer.Exit(1) from exc
+
+    console.print()
+    console.print(
+        f"  bisher: [cyan]{stored.get('embedder', '?')}[/] "
+        f"[dim](Profil {stored.get('embedder_profile', '?')})[/]"
+    )
+    console.print(f"  neu:    [cyan]{config.model_id}[/] [dim](Profil {ziel})[/]")
+    console.print(f"  {len(known)} Dokument(e) werden neu aufgenommen")
+
+    if clear_cache:
+        entfernt = clear_extract_cache()
+        console.print(f"  [dim]{entfernt} Cache-Eintrag/Einträge gelöscht[/]")
+    else:
+        anzahl, bytes_ = extract_cache_size()
+        if anzahl:
+            console.print(
+                f"  [dim]Extraktions-Cache: {anzahl} Eintrag/Einträge, "
+                f"{bytes_ / 1024 / 1024:.1f} MB — Extraktion wird "
+                f"übersprungen, wo möglich[/]"
+            )
+    console.print()
+
+    try:
+        settings = replace(
+            Settings.load(fallback=Settings.for_platform()),
+            index_path=index,
+            embedder_profile=ziel,
+        )
+    except WhichllmError as exc:
+        console.print(f"[red]Fehler:[/] {exc}")
+        raise typer.Exit(1) from exc
+
+    pipeline = RagPipeline(settings)
+    try:
+        with console.status("[dim]baut neu…[/]") as status:
+
+            def on_progress(path: Path, position: int, total: int, phase: str) -> None:
+                status.update(f"[dim]{position}/{total} {path.name} — {phase}[/]")
+
+            report = pipeline.rebuild_index(progress=on_progress)
+    except (PipelineError, StoreError, EmbeddingError) as exc:
+        console.print(f"[red]Fehler:[/] {exc}")
+        raise typer.Exit(1) from exc
+    finally:
+        pipeline.close()
+
+    _render_ingest(report)
+
+    if report.failed:
+        raise typer.Exit(1)
+
+
 @app.command(name="eval")
 def eval_cmd(
-    index: Path = typer.Option(DEFAULT_INDEX_PATH, "--index", help="Index-Datei"),
+    index: Path | None = typer.Option(
+        None, "--index", help="Index-Datei; ohne Angabe aus den Einstellungen"
+    ),
     gold: Path = typer.Option(
         DEFAULT_GOLD_PATH, "--gold", help="Goldstandard als JSON"
     ),
@@ -772,6 +913,7 @@ def eval_cmd(
         format="%(levelname)s %(name)s: %(message)s",
     )
 
+    index = _resolve_index(index)
     if not index.exists():
         console.print(f"[red]Fehler:[/] kein Index unter {index} — erst 'rag ingest'")
         raise typer.Exit(1)
@@ -932,7 +1074,9 @@ def _render_answer_checks(pipeline, questions, out) -> None:
 
 @app.command()
 def gui(
-    index: Path = typer.Option(DEFAULT_INDEX_PATH, "--index", help="Index-Datei"),
+    index: Path | None = typer.Option(
+        None, "--index", help="Index-Datei; ohne Angabe aus den Einstellungen"
+    ),
     port: int = typer.Option(8080, "--port", help="Port für die Oberfläche"),
     host: str = typer.Option("127.0.0.1", "--host", help="Adresse zum Binden"),
     no_browser: bool = typer.Option(

@@ -43,7 +43,7 @@ from rag.pipeline import (
 from rag.rerank import RerankError
 from rag.resolve import ResolutionError
 from rag.detect import WhichllmError
-from rag.store import StoreError
+from rag.store import StoreError, read_index_documents
 
 logger = logging.getLogger(__name__)
 
@@ -680,10 +680,44 @@ def page_settings() -> None:
                 label="Gerät",
             ).props("outlined dense")
             ui.label(
-                "Das Profil des bestehenden Index gewinnt gegen diese "
-                "Einstellung — gesucht werden muss mit dem Modell, mit dem "
-                "indiziert wurde."
+                "Ein anderes Modell macht den bestehenden Index unbrauchbar: "
+                "Vektoren verschiedener Modelle sind nicht vergleichbar. Bis "
+                "zum Neuaufbau gilt weiter das Modell des Index."
             ).classes("text-xs text-gray-500")
+
+            # Der Konflikt gehört hierhin und nicht ins Protokoll: wer das
+            # Profil umstellt und "Gespeichert" liest, muss erfahren, dass
+            # noch nichts davon wirkt.
+            conflict_card = ui.card().classes("w-full bg-amber-50 dark:bg-amber-900")
+            with conflict_card:
+                conflict_label = ui.label("").classes("text-sm font-medium")
+                rebuild_button = ui.button("Index jetzt neu aufbauen").props(
+                    "unelevated color=amber-8"
+                )
+                rebuild_hint = ui.label("").classes("text-xs")
+                rebuild_progress = ui.linear_progress(value=0, show_value=False)
+                rebuild_progress.visible = False
+
+            def refresh_conflict() -> None:
+                conflict = current.pipeline.profile_conflict()
+                if not conflict:
+                    conflict_card.visible = False
+                    return
+                im_index, gewuenscht = conflict
+                anzahl = len(read_index_documents(current.settings.index_path))
+                conflict_card.visible = True
+                conflict_label.text = (
+                    f"Der Index wurde mit Profil „{im_index}“ gebaut, "
+                    f"eingestellt ist „{gewuenscht}“. Es gilt weiter "
+                    f"„{im_index}“."
+                )
+                rebuild_hint.text = (
+                    f"{anzahl} Dokument(e) werden neu eingelesen. Die "
+                    "Extraktion kommt aus dem Cache, neu berechnet werden nur "
+                    "die Vektoren."
+                )
+
+            refresh_conflict()
 
         with ui.card().classes("w-full"):
             ui.label("Retrieval").classes("font-bold")
@@ -782,6 +816,37 @@ def page_settings() -> None:
         ui.notify("Auf Plattformvorgaben zurückgesetzt", type="positive")
         ui.navigate.to("/einstellungen")
 
+    async def on_rebuild() -> None:
+        rebuild_button.disable()
+        rebuild_progress.visible = True
+        rebuild_progress.value = 0
+        loop = asyncio.get_running_loop()
+
+        def on_progress(path: Path, position: int, total: int, phase: str) -> None:
+            def update() -> None:
+                rebuild_hint.text = f"{position}/{total} — {path.name} ({phase})"
+                rebuild_progress.value = position / total if total else 0
+
+            loop.call_soon_threadsafe(update)
+
+        try:
+            report = await _in_thread(
+                current.pipeline.rebuild_index, progress=on_progress
+            )
+            ui.notify(
+                f"Index neu aufgebaut: {len(report.changed)} Dokument(e), "
+                f"{report.chunk_count} Chunks, {report.duration_seconds:.0f}s",
+                type="positive",
+            )
+            refresh_conflict()
+        except ERRORS as exc:
+            _notify_error(exc)
+        finally:
+            rebuild_progress.visible = False
+            rebuild_button.enable()
+
+    rebuild_button.on_click(on_rebuild)
+
     def save() -> None:
         try:
             changes = {
@@ -801,7 +866,20 @@ def page_settings() -> None:
             }
             current.rebuild(**changes)
             path = current.settings.save()
-            ui.notify(f"Gespeichert in {path}", type="positive")
+            refresh_conflict()
+            if conflict := current.pipeline.profile_conflict():
+                # Nicht bloß "Gespeichert" melden, wenn die Einstellung noch
+                # nicht wirkt — das war der Fehler, den es hier zu vermeiden gilt.
+                im_index, _ = conflict
+                ui.notify(
+                    f"Gespeichert, aber noch nicht wirksam: der Index läuft "
+                    f"weiter mit „{im_index}“. Erst der Neuaufbau schaltet um.",
+                    type="warning",
+                    multi_line=True,
+                    close_button="ok",
+                )
+            else:
+                ui.notify(f"Gespeichert in {path}", type="positive")
         except (ERRORS, ValueError, TypeError) as exc:
             _notify_error(exc)
 
