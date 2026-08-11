@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rag.detect import load_config
+from rag.hfload import load_offline_first
 
 logger = logging.getLogger(__name__)
 
@@ -187,11 +188,22 @@ class Embedder:
             self.device,
             self.batch_size,
         )
+        # Offline zuerst (siehe rag/hfload.py): ein zwischengespeichertes Modell
+        # lädt ohne Netz, ohne HF-Roundtrip und ohne die Unauthenticated-Warnung.
+        # Heruntergeladen wird nur, was fehlt.
         try:
-            model = SentenceTransformer(self.config.model_id, device=self.device)
+            model = load_offline_first(
+                lambda offline: SentenceTransformer(
+                    self.config.model_id,
+                    device=self.device,
+                    local_files_only=offline,
+                ),
+                was=self.config.model_id,
+            )
         except Exception as exc:
             raise EmbeddingError(
-                f"Modell '{self.config.model_id}' konnte nicht geladen werden: {exc}"
+                f"Modell '{self.config.model_id}' konnte nicht geladen "
+                f"werden: {exc}"
             ) from exc
 
         # Das Modell-Limit gewinnt gegen die Konfiguration: steht dort eine

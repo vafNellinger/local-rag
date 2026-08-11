@@ -23,6 +23,7 @@ from dataclasses import dataclass, replace
 
 from rag.detect import load_config
 from rag.embed import resolve_device
+from rag.hfload import load_offline_first
 from rag.store import SearchHit
 
 logger = logging.getLogger(__name__)
@@ -111,11 +112,17 @@ class Reranker:
             ) from exc
 
         logger.debug("Lade Reranker %s auf %s", self.config.model_id, self.device)
+        # Offline zuerst, wie beim Embedder (siehe rag/hfload.py): Cache ohne
+        # Netz und ohne HF-Roundtrip, nachgeladen wird nur, was fehlt.
         try:
-            return CrossEncoder(
-                self.config.model_id,
-                device=self.device,
-                max_length=self.config.max_seq_length,
+            return load_offline_first(
+                lambda offline: CrossEncoder(
+                    self.config.model_id,
+                    device=self.device,
+                    max_length=self.config.max_seq_length,
+                    local_files_only=offline,
+                ),
+                was=f"Reranker {self.config.model_id}",
             )
         except Exception as exc:
             raise RerankError(
