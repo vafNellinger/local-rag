@@ -1,20 +1,30 @@
-"""Index: SQLite plus sqlite-vec.
+"""Index: SQLite für die Buchhaltung, austauschbares Backend für die Vektoren.
 
-Eine Datei, kein Server. Das ist für ein lokales RAG die richtige Größe —
-ein Vektorstore-Dienst neben einem Ein-Nutzer-Werkzeug wäre Betriebsaufwand
-ohne Gegenwert.
+Dokumente, Chunk-Texte und Metadaten liegen immer in SQLite. Die
+Nachbarschaftssuche liegt hinter ``vectors.VectorBackend`` und ist wählbar:
+sqlite-vec in derselben Datei (Vorgabe), sonst LanceDB, Chroma oder Qdrant in
+einem Nebenverzeichnis. Mit der Vorgabe bleibt ein Index genau eine Datei —
+für ein Ein-Nutzer-Werkzeug die richtige Größe.
 
-Zwei Eigenschaften tragen den Entwurf:
+Drei Eigenschaften tragen den Entwurf:
 
 **Der Index kennt sein Embedding-Modell.** Vektoren aus zwei Modellen im
 selben Raum sind Unsinn, und der Fehler ist still: die Suche liefert weiter
 Ergebnisse, nur falsche. Modell und Dimension stehen deshalb in ``meta`` und
-werden bei jedem Öffnen geprüft.
+werden bei jedem Öffnen geprüft — ebenso das Backend, denn die Vektoren eines
+Index liegen nur in genau einem.
 
 **Ingest ist idempotent über den Dateihash.** Ein zweiter Lauf über dasselbe
 Verzeichnis kostet nur das Hashen. Geänderte Dateien werden komplett ersetzt,
 nicht ergänzt — Chunk-Grenzen verschieben sich bei jeder Textänderung, ein
 Abgleich einzelner Chunks wäre aufwendiger als das Neuschreiben.
+
+**Chunk-IDs werden nie wiederverwendet.** ``AUTOINCREMENT`` statt des
+gewöhnlichen Rowid-Verhaltens: externe Backends liegen nicht in der
+SQLite-Transaktion, und eine wiederverwendete ID könnte dort auf einen alten
+Vektor treffen, dessen Text inzwischen ein anderer ist. Das wäre ein stiller
+Fehler in der Trefferqualität. Mit fortlaufenden IDs werden solche Reste zu
+Waisen, die beim Nachladen aus SQLite einfach wegfallen.
 """
 
 from __future__ import annotations
@@ -30,13 +40,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from rag.chunk import Chunk
+from rag.vectors import (
+    DEFAULT_BACKEND,
+    VectorBackend,
+    VectorBackendError,
+    create_backend,
+)
 
 logger = logging.getLogger(__name__)
 
 # Hochzählen, wenn sich das Schema ändert. Ein Index mit anderer Version wird
 # abgelehnt statt migriert: solange das Projekt keine Nutzerdaten hat, ist
 # Neuaufbau billiger als Migrationscode, der nie getestet wird.
-SCHEMA_VERSION = 1
+#
+# 2: chunks.id ist AUTOINCREMENT, und die vec0-Tabelle wird nicht mehr hier
+#    angelegt, sondern vom Vektor-Backend.
+SCHEMA_VERSION = 2
 
 DEFAULT_INDEX_NAME = "index.db"
 
@@ -163,7 +182,7 @@ def read_index_documents(path: str | Path) -> list[str]:
     return [str(row[0]) for row in rows]
 
 
-def _connect(path: Path) -> sqlite3.Connection:
+def _connect(path: Path, *, load_vec: bool = True) -> sqlite3.Connection:
     # check_same_thread=False, weil die Oberfläche den Store aus mehreren
     # Threads benutzt: der Event-Loop öffnet ihn für die Kennzahlen, ein
     # Arbeitsthread sucht und schreibt darin. Pythons Thread-Prüfung würde das
@@ -172,24 +191,32 @@ def _connect(path: Path) -> sqlite3.Connection:
     # in der CLI nie auftritt, weil dort alles ein Thread ist.
     connection = sqlite3.connect(path, check_same_thread=False)
     connection.row_factory = sqlite3.Row
-    try:
-        import sqlite_vec
-    except ImportError as exc:  # pragma: no cover
-        raise StoreError("sqlite-vec fehlt: uv pip install sqlite-vec") from exc
 
-    try:
-        connection.enable_load_extension(True)
-        sqlite_vec.load(connection)
-        connection.enable_load_extension(False)
-    except (AttributeError, sqlite3.OperationalError) as exc:
-        # Manche Distributions-Builds von Python liefern SQLite ohne
-        # Extension-Unterstützung. Ohne sie gibt es keine Vektorsuche, und die
-        # Meldung muss den Grund nennen statt nur "geht nicht".
-        raise StoreError(
-            "SQLite dieser Python-Installation kann keine Erweiterungen laden — "
-            "sqlite-vec ist damit nicht nutzbar. Abhilfe: Python aus einem Build "
-            "mit --enable-loadable-sqlite-extensions verwenden (z.B. über uv)."
-        ) from exc
+    # Nur wenn die Vektoren auch hier liegen. Bei LanceDB, Chroma oder Qdrant
+    # braucht SQLite keine Erweiterung — und auf einem Python ohne
+    # Extension-Unterstützung ist das der Unterschied zwischen "läuft" und
+    # "läuft nicht".
+    if load_vec:
+        try:
+            import sqlite_vec
+        except ImportError as exc:  # pragma: no cover
+            raise StoreError("sqlite-vec fehlt: uv pip install sqlite-vec") from exc
+
+        try:
+            connection.enable_load_extension(True)
+            sqlite_vec.load(connection)
+            connection.enable_load_extension(False)
+        except (AttributeError, sqlite3.OperationalError) as exc:
+            # Manche Distributions-Builds von Python liefern SQLite ohne
+            # Extension-Unterstützung. Ohne sie gibt es keine Vektorsuche, und
+            # die Meldung muss den Grund nennen statt nur "geht nicht".
+            raise StoreError(
+                "SQLite dieser Python-Installation kann keine Erweiterungen "
+                "laden — sqlite-vec ist damit nicht nutzbar. Abhilfe: Python "
+                "aus einem Build mit --enable-loadable-sqlite-extensions "
+                "verwenden (z.B. über uv), oder ein Vektor-Backend wählen, "
+                "das ohne Erweiterung auskommt (--store lancedb)."
+            ) from exc
 
     # WAL: der Ingest schreibt lange, eine parallele Abfrage soll dabei lesen
     # können, ohne auf den Abschluss zu warten.
@@ -208,12 +235,25 @@ class IndexStore:
         embedder: str,
         dimensions: int,
         profile: str = "default",
+        vector_backend: str = DEFAULT_BACKEND,
+        backend_options: dict | None = None,
     ) -> None:
         self.path = Path(path).expanduser()
         self.embedder = embedder
         self.dimensions = dimensions
         self.profile = profile
+        self.vector_backend = vector_backend
         self._connection: sqlite3.Connection | None = None
+        # Gebaut, aber nicht geöffnet: create_backend() importiert keine
+        # Bibliothek, das passiert erst in vectors.open(). Ein Store, dessen
+        # Konstruktor chromadb lädt, wäre in der Oberfläche nicht benutzbar.
+        self.vectors: VectorBackend = create_backend(
+            vector_backend,
+            index_path=self.path,
+            dimensions=dimensions,
+            connection=lambda: self.connection,
+            options=backend_options,
+        )
         # Reentrant, weil replace_document intern document_record und
         # _delete_document aufruft. Der Lock sitzt hier und nicht im Aufrufer:
         # ein Store, dessen Thread-Sicherheit von der Disziplin der Oberfläche
@@ -231,13 +271,30 @@ class IndexStore:
     def open(self) -> IndexStore:
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self._connection = _connect(self.path)
+            self._connection = _connect(
+                self.path, load_vec=self.vector_backend == DEFAULT_BACKEND
+            )
             self._create_schema()
+            # Vor dem Backend: stimmt das Backend nicht, soll die Meldung das
+            # sagen und nicht erst ein LanceDB-Verzeichnis angelegt werden,
+            # das zu einem Index mit Chroma-Vektoren gehört.
             self._check_compatibility()
+            try:
+                self.vectors.open()
+            except VectorBackendError as exc:
+                # Die Verbindung nicht offen zurücklassen — der Aufrufer sieht
+                # eine Ausnahme und ruft kein close() mehr.
+                self._connection.close()
+                self._connection = None
+                # Als StoreError weiter: für den Aufrufer ist eine fehlende
+                # Backend-Bibliothek ein nicht benutzbarer Index, und jede
+                # Fehlerbehandlung fängt schon StoreError.
+                raise StoreError(str(exc)) from exc
         return self
 
     def close(self) -> None:
         with self._lock:
+            self.vectors.close()
             if self._connection is not None:
                 self._connection.close()
                 self._connection = None
@@ -270,7 +327,9 @@ class IndexStore:
             );
 
             CREATE TABLE IF NOT EXISTS chunks (
-                id           INTEGER PRIMARY KEY,
+                -- AUTOINCREMENT, damit IDs nie wiederverwendet werden: siehe
+                -- Modulkopf, externe Backends hängen daran.
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 document_id  INTEGER NOT NULL
                              REFERENCES documents(id) ON DELETE CASCADE,
                 ordinal      INTEGER NOT NULL,
@@ -285,20 +344,9 @@ class IndexStore:
                 ON chunks(document_id);
             """
         )
-
-        # Cosine, weil bge-m3 normalisierte Vektoren liefert und Cosine dort
-        # die Metrik ist, gegen die trainiert wurde. Die vec0-Tabelle kennt
-        # keine Fremdschlüssel, ihre Zeilen werden in _delete_document
-        # zusammen mit den Chunks entfernt.
-        db.execute(
-            f"""
-            CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vectors USING vec0(
-                chunk_id  INTEGER PRIMARY KEY,
-                embedding float[{self.dimensions}] distance_metric=cosine
-            )
-            """
-        )
         db.commit()
+        # Die Vektortabelle legt das Backend an, nicht dieses Schema — bei
+        # sqlite-vec liegt sie in derselben Datei, bei den anderen daneben.
 
     def _check_compatibility(self) -> None:
         """Modell, Dimension und Schema-Version gegen den Bestand prüfen."""
@@ -312,6 +360,7 @@ class IndexStore:
             "schema_version": str(SCHEMA_VERSION),
             "embedder": self.embedder,
             "dimensions": str(self.dimensions),
+            "vector_backend": self.vector_backend,
         }
 
         if not stored:
@@ -349,6 +398,20 @@ class IndexStore:
                 f"angefragt sind {self.dimensions} — Index neu aufbauen"
             )
 
+        # Die Vektoren eines Index liegen in genau einem Backend. Ein Wechsel
+        # ohne Neuaufbau träfe auf einen leeren Speicher: SQLite hätte alle
+        # Chunks, die Suche fände nichts. Das sieht nach einem kaputten Index
+        # aus, ist aber nur die falsche Wahl — deshalb hier benannt.
+        if stored.get("vector_backend", DEFAULT_BACKEND) != expected["vector_backend"]:
+            raise StoreError(
+                f"Index wurde mit Vektor-Backend "
+                f"'{stored.get('vector_backend', DEFAULT_BACKEND)}' gebaut, "
+                f"angefragt ist '{self.vector_backend}'. Die Vektoren liegen "
+                f"nur im ursprünglichen Backend — entweder das alte wählen "
+                f"oder mit 'rag reindex --store {self.vector_backend}' "
+                f"umbauen."
+            )
+
         # Index aus einer Version ohne Profilfeld: nachtragen statt ablehnen,
         # das Modell stimmt ja. Sonst müsste ein bestehender Index für ein
         # reines Metadatum neu gebaut werden.
@@ -382,22 +445,23 @@ class IndexStore:
         record = self.document_record(path)
         return record is not None and record.sha256 == sha256
 
-    def _delete_document(self, document_id: int) -> None:
-        """Dokument samt Chunks und Vektoren entfernen.
+    def _delete_document(self, document_id: int) -> list[int]:
+        """Dokument samt Chunks entfernen; gibt die betroffenen Chunk-IDs zurück.
 
-        Die Vektoren zuerst und explizit: ``chunk_vectors`` ist eine
-        vec0-Tabelle und hängt nicht am ON-DELETE-CASCADE der Chunks. Ohne
-        diesen Schritt bleiben verwaiste Vektoren zurück, die bei der Suche
-        auf nicht mehr existierende Chunk-IDs zeigen.
+        Nur der SQLite-Teil. Die Vektoren löscht der Aufrufer nach dem Commit,
+        weil externe Backends nicht in dieser Transaktion liegen — die
+        Reihenfolge ist im Kopf von ``vectors.py`` begründet.
         """
         db = self.connection
-        db.execute(
-            "DELETE FROM chunk_vectors WHERE chunk_id IN "
-            "(SELECT id FROM chunks WHERE document_id = ?)",
-            (document_id,),
-        )
+        ids = [
+            int(row[0])
+            for row in db.execute(
+                "SELECT id FROM chunks WHERE document_id = ?", (document_id,)
+            )
+        ]
         db.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
         db.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+        return ids
 
     def replace_document(
         self,
@@ -422,64 +486,72 @@ class IndexStore:
                 "das darf nicht auseinanderlaufen"
             )
 
-        import sqlite_vec
+        # Alle Dimensionen vor dem ersten Schreibzugriff prüfen. Vorher stand
+        # das in der Schreibschleife und verließ sich auf den Rollback; das
+        # trägt nicht mehr, seit die Vektoren außerhalb der Transaktion landen.
+        for vector in embeddings:
+            if len(vector) != self.dimensions:
+                raise StoreError(
+                    f"Vektor hat {len(vector)} Dimensionen, "
+                    f"der Index erwartet {self.dimensions}"
+                )
 
         normalized = self._normalize(path)
 
-        # Eine Transaktion über Löschen und Neuschreiben: bricht der Ingest
-        # mitten im Dokument ab, bleibt der alte Stand statt einer halben Datei.
-        with self._lock, self.connection as db:
-            if existing := self.document_record(normalized):
-                self._delete_document(existing.id)
+        with self._lock:
+            # Eine Transaktion über Löschen und Neuschreiben: bricht der Ingest
+            # mitten im Dokument ab, bleibt der alte Stand statt einer halben
+            # Datei.
+            with self.connection as db:
+                stale: list[int] = []
+                if existing := self.document_record(normalized):
+                    stale = self._delete_document(existing.id)
 
-            cursor = db.execute(
-                """
-                INSERT INTO documents
-                    (path, sha256, format, page_count, char_count,
-                     ocr_used, chunk_count, ingested_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    normalized,
-                    sha256,
-                    format,
-                    page_count,
-                    char_count,
-                    int(ocr_used),
-                    len(chunks),
-                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                ),
-            )
-            document_id = int(cursor.lastrowid)
-
-            for chunk, vector in zip(chunks, embeddings):
-                if len(vector) != self.dimensions:
-                    raise StoreError(
-                        f"Vektor hat {len(vector)} Dimensionen, "
-                        f"der Index erwartet {self.dimensions}"
-                    )
-                chunk_cursor = db.execute(
+                cursor = db.execute(
                     """
-                    INSERT INTO chunks
-                        (document_id, ordinal, text, heading_path, kind, token_count)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO documents
+                        (path, sha256, format, page_count, char_count,
+                         ocr_used, chunk_count, ingested_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        document_id,
-                        chunk.ordinal,
-                        chunk.text,
-                        json.dumps(list(chunk.heading_path), ensure_ascii=False),
-                        chunk.kind,
-                        chunk.token_count,
+                        normalized,
+                        sha256,
+                        format,
+                        page_count,
+                        char_count,
+                        int(ocr_used),
+                        len(chunks),
+                        datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     ),
                 )
-                db.execute(
-                    "INSERT INTO chunk_vectors(chunk_id, embedding) VALUES (?, ?)",
-                    (
-                        int(chunk_cursor.lastrowid),
-                        sqlite_vec.serialize_float32(list(vector)),
-                    ),
-                )
+                document_id = int(cursor.lastrowid)
+
+                chunk_ids: list[int] = []
+                for chunk in chunks:
+                    chunk_cursor = db.execute(
+                        """
+                        INSERT INTO chunks
+                            (document_id, ordinal, text, heading_path, kind,
+                             token_count)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            document_id,
+                            chunk.ordinal,
+                            chunk.text,
+                            json.dumps(list(chunk.heading_path), ensure_ascii=False),
+                            chunk.kind,
+                            chunk.token_count,
+                        ),
+                    )
+                    chunk_ids.append(int(chunk_cursor.lastrowid))
+
+            # Ab hier steht SQLite fest. Erst die alten Vektoren weg, dann die
+            # neuen dazu — dank AUTOINCREMENT sind die ID-Mengen disjunkt, das
+            # Löschen kann die neuen Einträge also nicht treffen.
+            self.vectors.delete(stale)
+            self.vectors.add(chunk_ids, list(embeddings))
 
         return len(chunks)
 
@@ -491,16 +563,19 @@ class IndexStore:
         """
         keep = {self._normalize(p) for p in present}
         removed: list[str] = []
-        with self._lock, self.connection:
-            for row in self.connection.execute(
-                "SELECT id, path FROM documents"
-            ).fetchall():
-                if row["path"] in keep:
-                    continue
-                if Path(row["path"]).exists():
-                    continue
-                self._delete_document(row["id"])
-                removed.append(row["path"])
+        stale: list[int] = []
+        with self._lock:
+            with self.connection:
+                for row in self.connection.execute(
+                    "SELECT id, path FROM documents"
+                ).fetchall():
+                    if row["path"] in keep:
+                        continue
+                    if Path(row["path"]).exists():
+                        continue
+                    stale.extend(self._delete_document(row["id"]))
+                    removed.append(row["path"])
+            self.vectors.delete(stale)
         return removed
 
     # ─── Lesen ───────────────────────────────────────────────────────────────
@@ -513,34 +588,45 @@ class IndexStore:
                 f"der Index erwartet {self.dimensions}"
             )
 
-        import sqlite_vec
-
         with self._lock:
+            nachbarn = self.vectors.search(list(vector), limit)
+            if not nachbarn:
+                return []
+
+            distanz = {chunk_id: d for chunk_id, d in nachbarn}
+            platzhalter = ",".join("?" * len(distanz))
+            # Zwei Abfragen statt eines JOINs über die Vektortabelle: nur so
+            # sieht der Pfad für alle Backends gleich aus. Die Kosten sind ein
+            # Primärschlüssel-Lookup über ``limit`` Zeilen.
             rows = self.connection.execute(
-                """
-                SELECT v.chunk_id, v.distance, c.ordinal, c.text, c.heading_path,
-                       c.kind, d.path
-                FROM chunk_vectors AS v
-                JOIN chunks AS c ON c.id = v.chunk_id
+                f"""
+                SELECT c.id, c.ordinal, c.text, c.heading_path, c.kind, d.path
+                FROM chunks AS c
                 JOIN documents AS d ON d.id = c.document_id
-                WHERE v.embedding MATCH ? AND k = ?
-                ORDER BY v.distance
+                WHERE c.id IN ({platzhalter})
                 """,
-                (sqlite_vec.serialize_float32(list(vector)), limit),
+                tuple(distanz),
             ).fetchall()
 
-        return [
+        # Chunk-IDs, die das Backend kennt, SQLite aber nicht, fallen hier
+        # stillschweigend weg. Das sind Waisen aus einem abgebrochenen Ingest;
+        # sie zu überspringen ist richtig, nur die Trefferzahl kann dadurch
+        # unter ``limit`` liegen.
+        treffer = [
             SearchHit(
-                chunk_id=row["chunk_id"],
+                chunk_id=row["id"],
                 document_path=row["path"],
                 ordinal=row["ordinal"],
                 text=row["text"],
                 heading_path=tuple(json.loads(row["heading_path"])),
                 kind=row["kind"],
-                distance=float(row["distance"]),
+                distance=distanz[row["id"]],
             )
             for row in rows
         ]
+        # Die IN-Abfrage liefert in Rowid-Reihenfolge, nicht nach Nähe.
+        treffer.sort(key=lambda hit: hit.distance)
+        return treffer
 
     def stats(self) -> dict[str, int | str]:
         """Kennzahlen für die Anzeige."""
@@ -548,10 +634,13 @@ class IndexStore:
             db = self.connection
             documents = db.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
             chunks = db.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-            vectors = db.execute("SELECT COUNT(*) FROM chunk_vectors").fetchone()[0]
             tokens = db.execute(
                 "SELECT COALESCE(SUM(token_count), 0) FROM chunks"
             ).fetchone()[0]
+            # Die Vektorzahl kommt aus dem Backend. Weicht sie von der
+            # Chunk-Zahl ab, ist ein Ingest abgebrochen — die Anzeige stellt
+            # beide nebeneinander, damit das auffällt.
+            vectors = self.vectors.count()
         return {
             "documents": documents,
             "chunks": chunks,
@@ -560,6 +649,7 @@ class IndexStore:
             "embedder": self.embedder,
             "profile": self.profile,
             "dimensions": self.dimensions,
+            "vector_backend": self.vector_backend,
             "path": str(self.path),
         }
 

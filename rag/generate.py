@@ -64,6 +64,41 @@ NO_CONTEXT_ANSWER = (
     "oder die Frage trifft ihren Wortlaut nicht."
 )
 
+# Für den Mehrturn-Chat entscheidet ein einziger Aufruf zwei Dinge: Reicht das,
+# was schon geholt wurde, oder muss neu gesucht werden — und wenn gesucht wird,
+# mit welcher Query? Beides gehört zusammen, weil beides denselben Kontext
+# braucht (Verlauf plus die bereits vorliegenden Quellen), und ein lokales
+# Modell ist langsam genug, dass ein zweiter Aufruf spürbar kostet.
+#
+# Der Marker ist ein technisches Token, kein Satz: so lässt sich die
+# Reuse-Entscheidung eindeutig von einer umgeschriebenen Query trennen.
+REUSE_MARKER = "QUELLEN_REICHEN"
+
+ROUTE_SYSTEM_PROMPT = f"""Du steuerst eine Dokumentensuche in einem Gespräch.
+
+Gegeben ein Gesprächsverlauf, die bereits vorliegenden Quellen und eine
+Folgefrage, entscheide, ob die vorliegenden Quellen die Folgefrage bereits
+beantworten können.
+
+Antworte in genau einer von zwei Formen:
+
+1. Reichen die vorliegenden Quellen — etwa bei „fasse das zusammen", „was
+   heißt das genau", „und der zweite Punkt?" —, gib exakt dieses eine Wort aus:
+   {REUSE_MARKER}
+
+2. Braucht die Folgefrage andere Quellen, gib stattdessen eine eigenständige
+   Suchanfrage aus: die Folgefrage so umgeschrieben, dass sie ohne den Verlauf
+   verständlich ist, mit aufgelösten Rückbezügen („das", „die Frist", „dort").
+
+Regeln:
+- Gib nur das eine Wort ODER die Suchanfrage aus, nichts sonst — keine
+  Erklärung, keine Anführungszeichen.
+- Sind keine Quellen aufgeführt, ist Form 1 nicht möglich; gib eine
+  Suchanfrage aus.
+- Im Zweifel neu suchen: eine überflüssige Suche kostet Zeit, eine
+  ausgelassene kostet die Antwort.
+- Bleib in der Sprache der Frage."""
+
 
 class GenerationError(RuntimeError):
     """Das Generator-Modell ist nicht benutzbar."""
@@ -222,12 +257,100 @@ def build_sources(
     return sources, 0
 
 
-def build_prompt(question: str, sources: Sequence[Source]) -> list[dict[str, str]]:
+@dataclass
+class Turn:
+    """Ein abgeschlossener Frage-Antwort-Wechsel im Gesprächsverlauf.
+
+    ``sources`` trägt die Quellen, die diese Antwort belegt haben. Der
+    *Prompt* nutzt sie nicht — ``build_prompt`` bettet nur Frage und Antwort
+    ein, weil die Chunks noch einmal einzubetten das Kontextbudget nach wenigen
+    Runden sprengen würde. Gebraucht werden sie an anderer Stelle: der Router
+    prüft an ihnen, ob eine Folgefrage ohne neue Suche auskommt, und übernimmt
+    sie dann als Kontext (siehe ``pipeline.plan_retrieval``).
+    """
+
+    question: str
+    answer: str
+    sources: list[Source] = field(default_factory=list)
+
+
+@dataclass
+class RouteDecision:
+    """Ergebnis der Router-Entscheidung vor dem Retrieval.
+
+    ``reuse`` — die vorliegenden Quellen genügen, es wird nicht neu gesucht.
+    ``query`` — womit gesucht wird, falls doch (die umgeschriebene Folgefrage).
+    """
+
+    reuse: bool
+    query: str
+
+
+def build_route_prompt(
+    history: Sequence[Turn], question: str, available: Sequence[str]
+) -> list[dict[str, str]]:
+    """Prompt für die Router-Entscheidung: Quellen wiederverwenden oder suchen.
+
+    ``available`` sind die Kurzbelege (Dateiname und Überschrift) der bereits
+    vorliegenden Quellen — nicht ihre Volltexte. Für die Entscheidung „geht es
+    noch um dasselbe" reicht das und hält den Aufruf billig; im Zweifel lässt
+    der Systemprompt neu suchen.
+    """
+    zeilen = []
+    for turn in history:
+        zeilen.append(f"Frage: {turn.question}")
+        zeilen.append(f"Antwort: {turn.answer}")
+    verlauf = "\n".join(zeilen)
+
+    if available:
+        quellen = "\n".join(f"- {zitat}" for zitat in available)
+    else:
+        quellen = "(keine)"
+
+    user = (
+        f"Gesprächsverlauf:\n{verlauf}\n\n"
+        f"Vorliegende Quellen:\n{quellen}\n\n"
+        f"Folgefrage: {question}\n\n"
+        f"Antwort ({REUSE_MARKER} oder Suchanfrage):"
+    )
+    return [
+        {"role": "system", "content": ROUTE_SYSTEM_PROMPT},
+        {"role": "user", "content": user},
+    ]
+
+
+def parse_route(text: str, question: str, *, allow_reuse: bool) -> RouteDecision:
+    """Antwort des Routers deuten.
+
+    ``allow_reuse`` ist der Riegel gegen ein ungehorsames Modell: sagt es
+    Wiederverwendung, obwohl gar keine Quellen vorliegen, wird daraus eine
+    normale Suche mit der Originalfrage — nie eine Query, die aus dem Marker
+    selbst besteht.
+    """
+    geputzt = text.strip()
+    if geputzt.upper().startswith(REUSE_MARKER):
+        if allow_reuse:
+            return RouteDecision(reuse=True, query=question)
+        return RouteDecision(reuse=False, query=question)
+    return RouteDecision(reuse=False, query=geputzt or question)
+
+
+def build_prompt(
+    question: str,
+    sources: Sequence[Source],
+    *,
+    history: Sequence[Turn] = (),
+) -> list[dict[str, str]]:
     """Chat-Nachrichten für llama.cpp bauen.
 
     Die Frage steht *nach* den Quellen. Bei langem Kontext gewichten Modelle
     das Ende stärker — die Frage soll das Letzte sein, was das Modell liest,
     nicht in der Mitte der Quellen verschwinden.
+
+    Der Verlauf steht als echte user/assistant-Wechsel *vor* der aktuellen
+    Frage, ohne Quellen (siehe ``Turn``). So sieht das Modell das Gespräch als
+    Gespräch und nicht als einen in den Fragetext gequetschten Textblock —
+    Rückbezüge in der Antwort werden dadurch verlässlicher.
     """
     if not sources:
         raise GenerationError("Prompt ohne Quellen — das ist kein RAG")
@@ -239,10 +362,12 @@ def build_prompt(question: str, sources: Sequence[Source]) -> list[dict[str, str
         f"Frage: {question}\n\n"
         f"Antworte auf Deutsch und belege mit Quellennummern."
     )
-    return [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user},
-    ]
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for turn in history:
+        messages.append({"role": "user", "content": turn.question})
+        messages.append({"role": "assistant", "content": turn.answer})
+    messages.append({"role": "user", "content": user})
+    return messages
 
 
 class Generator:

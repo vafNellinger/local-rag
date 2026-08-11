@@ -104,6 +104,44 @@ langs = ["de", "en"]
 device = "cpu"
 
 
+# ─── Vektor-Backend ──────────────────────────────────────────────────────────
+# Wo die Vektoren liegen. Anders als bei den Modellrollen steht das hier
+# global und nicht pro Plattformklasse: die Wahl hängt nicht an der Hardware,
+# sondern daran, was man mit dem Index vorhat. Eine Plattformklasse *darf* es
+# übersteuern (Feld "vector_backend"), nur gibt es dafür derzeit keinen Grund.
+#
+# Die Vektoren eines Index liegen in genau einem Backend. Umschalten heißt
+# deshalb neu aufbauen — "rag reindex --store <name>" tut das aus den bereits
+# extrahierten Texten, ohne erneutes OCR.
+#
+#   sqlite-vec  Vorgabe. Alles in einer Datei, keine zweite Abhängigkeit, ein
+#               Index ist genau eine Datei, die man kopieren kann. Bruteforce
+#               über alle Vektoren — bei den Größenordnungen dieses Projekts
+#               (einige Tausend Chunks) schnell genug.
+#   lancedb     Dateibasiert wie sqlite-vec, aber mit echtem ANN-Index; wird
+#               ab etwa 10^5 Chunks interessant. Legt index.lance/ daneben.
+#               Perspektive: kann Sparse- und Dense-Vektoren gemeinsam halten,
+#               also bge-m3s Sparse-Ausgabe für Hybrid-Retrieval nutzen.
+#   chromadb    Verbreitet und leicht zu inspizieren, bringt aber eine eigene
+#               Metadatenhaltung mit, die hier ungenutzt bleibt. Legt
+#               index.chroma/ daneben.
+#   qdrant      Ohne "url" eingebettet in index.qdrant/, mit "url" gegen einen
+#               laufenden Server. Beste Filter- und Skalierungseigenschaften,
+#               kostet dafür Betriebsaufwand. Achtung im eingebetteten Modus:
+#               Qdrant sperrt sein Verzeichnis exklusiv, CLI und Oberfläche
+#               können nicht gleichzeitig darauf zugreifen.
+
+[vector_store]
+backend = "sqlite-vec"
+
+# Leer lassen für den eingebetteten Modus. Mit Adresse (z.B.
+# "http://localhost:6333") wird ein laufender Qdrant benutzt; dann liegt der
+# Index nicht mehr vollständig im Dateisystem, und ein Backup der .db-Datei
+# allein genügt nicht.
+[vector_store.qdrant]
+url = ""
+
+
 # ─── Plattformklassen ────────────────────────────────────────────────────────
 #
 # Jede Klasse legt pro Rolle Gerät *und* Modellprofil fest. Das Profil zeigt

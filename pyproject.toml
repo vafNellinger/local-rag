@@ -34,6 +34,32 @@ generate = [
 gui = [
     "nicegui>=2.0",
 ]
+# Eigenständiges Fenster statt Browser-Tab (rag gui --native). pywebview nutzt
+# die im System vorhandene Webview-Engine: auf Windows das eingebaute Edge
+# WebView2, auf Linux WebKitGTK. Auf Linux sind dafür Systempakete nötig
+# (python3-gi, gir1.2-webkit2-4.1) und der venv muss sie sehen — deshalb baut
+# der Linux-Starter ihn aus dem System-Python mit --system-site-packages. Fehlt
+# eine Webview, fällt die Oberfläche automatisch auf den Browser zurück.
+native = [
+    "pywebview>=5.0",
+]
+# Alternative Vektor-Backends. Keines ist nötig — sqlite-vec steht in
+# [ingest] und ist die Vorgabe. Jedes hier ist einzeln installierbar, damit
+# niemand drei Vektordatenbanken mitschleppt, um eine zu benutzen.
+#
+# lancedb bringt pyarrow mit (~40 MB), chromadb einen ganzen Server-Stack
+# samt onnxruntime, qdrant-client nur grpc. Die Größenordnungen sind der
+# Grund für die Trennung.
+lancedb = [
+    "lancedb>=0.13",
+    "pyarrow>=15.0",
+]
+chromadb = [
+    "chromadb>=0.5",
+]
+qdrant = [
+    "qdrant-client>=1.10",
+]
 dev = [
     "pytest>=8.0",
 ]

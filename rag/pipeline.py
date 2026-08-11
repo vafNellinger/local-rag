@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -34,9 +34,13 @@ from rag.generate import (
     Answer,
     GenerationError,
     Generator,
+    RouteDecision,
+    Turn,
     build_prompt,
+    build_route_prompt,
     build_sources,
     gguf_path,
+    parse_route,
     supports_gpu_offload,
 )
 from rag.ingest import IngestReport, ingest_paths
@@ -47,7 +51,12 @@ from rag.rerank import (
     Reranker,
     load_reranker_config,
 )
-from rag.resolve import PipelinePlan, ResolutionError, resolve_pipeline
+from rag.resolve import (
+    PipelinePlan,
+    ResolutionError,
+    resolve_pipeline,
+    resolve_vector_backend,
+)
 from rag.store import (
     DEFAULT_INDEX_NAME,
     IndexStore,
@@ -56,6 +65,7 @@ from rag.store import (
     read_index_documents,
     read_index_meta,
 )
+from rag.vectors import DEFAULT_BACKEND, VectorBackendError, clear_vectors
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +98,13 @@ class Settings:
 
     embedder_profile: str = "default"
     embedder_device: str = "auto"
+
+    # Wo die Vektoren liegen. Gehört zum Index, nicht zur Maschine: ein
+    # bestehender Index bringt seine Wahl im Metadatum mit und übersteuert
+    # diesen Wert, sonst ließe sich ein Index nach dem Umstellen nicht mehr
+    # öffnen.
+    vector_backend: str = DEFAULT_BACKEND
+    vector_backend_options: dict = field(default_factory=dict)
 
     reranker_enabled: bool = True
     reranker_profile: str = "default"
@@ -135,8 +152,11 @@ class Settings:
 
         generator_device = str(class_config.get("generator_device", "cpu"))
         context = _parse_context(class_config.get("context_length", "8k"))
+        vector_backend, vector_options = resolve_vector_backend(cfg, class_config)
 
         return cls(
+            vector_backend=vector_backend,
+            vector_backend_options=vector_options,
             embedder_profile=str(class_config.get("embedder_profile", "default")),
             embedder_device=str(class_config.get("embedder_device", "cpu")),
             reranker_enabled=bool(class_config.get("reranker_enabled", True)),
@@ -356,6 +376,38 @@ class RagPipeline:
             return stored
         return self.settings.embedder_profile
 
+    def backend_conflict(self) -> tuple[str, str] | None:
+        """``(im Index, gewünscht)`` für das Vektor-Backend, falls verschieden.
+
+        Gegenstück zu ``profile_conflict()`` und aus demselben Grund da: wer in
+        der Oberfläche LanceDB wählt, würde sonst weiter gegen die sqlite-vec-
+        Vektoren des bestehenden Index suchen, ohne es zu merken.
+        """
+        stored = read_index_meta(self.settings.index_path).get("vector_backend")
+        if stored and stored != self.settings.vector_backend:
+            return stored, self.settings.vector_backend
+        return None
+
+    def _effective_vector_backend(self) -> str:
+        """Das Backend des Index gewinnt gegen die Einstellung.
+
+        Ohne diese Regel würde ein Umstellen den bestehenden Index nicht nur
+        unbrauchbar machen, sondern auf einen leeren Vektorspeicher zeigen —
+        die Suche liefe fehlerfrei und fände nichts.
+        """
+        if conflict := self.backend_conflict():
+            stored, requested = conflict
+            logger.warning(
+                "Index hat Vektor-Backend '%s', eingestellt ist '%s' — es "
+                "gilt '%s'. Für den Wechsel muss der Index neu aufgebaut "
+                "werden.",
+                stored,
+                requested,
+                stored,
+            )
+            return stored
+        return self.settings.vector_backend
+
     def rebuild_index(
         self,
         *,
@@ -369,6 +421,21 @@ class RagPipeline:
         Dateien unverändert sind — genau dafür liegt er außerhalb des Index.
         Dateien, die inzwischen verschwunden sind, fallen still heraus.
         """
+        # Vor dem Löschen lesen: danach ist nicht mehr feststellbar, welches
+        # Backend der alte Index benutzt hat, und sein Nebenverzeichnis würde
+        # als Waise zurückbleiben.
+        altes_meta = read_index_meta(self.settings.index_path)
+        altes_backend = altes_meta.get("vector_backend", DEFAULT_BACKEND)
+        # Für das Aufräumen einer Server-Sammlung: der Qdrant-Client verlangt
+        # die Vektorgröße beim Anlegen, auch wenn wir nur löschen wollen.
+        # Notfalls die eingestellte, sonst scheitert das Aufräumen an einem
+        # fehlenden Metadatum.
+        alte_dimensionen = int(
+            altes_meta.get("dimensions") or load_embedder_config(
+                self.settings.embedder_profile
+            ).dimensions
+        )
+
         known = [Path(p) for p in read_index_documents(self.settings.index_path)]
         vorhanden = [p for p in known if p.exists()]
         if len(vorhanden) < len(known):
@@ -396,6 +463,29 @@ class RagPipeline:
             except OSError as exc:  # pragma: no cover
                 logger.warning("%s nicht löschbar: %s", leftover, exc)
 
+        # Die Vektoren fallen nicht unter das Glob oben: aus index.db wird
+        # index.lance, nicht index.db-lance, und eine Qdrant-Sammlung auf einem
+        # Server liegt gar nicht im Dateisystem. Beide Backends aufräumen — das
+        # alte, damit nichts zurückbleibt, das neue, weil ein Rest von einem
+        # früheren Lauf sonst mit dem frischen Index verschmolzen würde.
+        for backend in {altes_backend, self.settings.vector_backend}:
+            try:
+                ergebnis = clear_vectors(
+                    self.settings.index_path,
+                    backend,
+                    dimensions=alte_dimensionen,
+                    options=self.settings.vector_backend_options,
+                )
+                logger.info("Vektoren (%s): %s", backend, ergebnis)
+            except (VectorBackendError, OSError) as exc:
+                # Kein Abbruch: der Neuaufbau soll auch gelingen, wenn das alte
+                # Backend nicht mehr erreichbar ist. Der Rest ist dann eine
+                # verwaiste Sammlung, die niemand mehr abfragt — sichtbar im
+                # Protokoll statt stillschweigend.
+                logger.warning(
+                    "Vektoren von '%s' nicht aufräumbar: %s", backend, exc
+                )
+
         logger.info(
             "Index wird mit Profil '%s' neu aufgebaut, %d Datei(en)",
             self.settings.embedder_profile,
@@ -415,6 +505,8 @@ class RagPipeline:
                 embedder=config.model_id,
                 dimensions=config.dimensions,
                 profile=profile,
+                vector_backend=self._effective_vector_backend(),
+                backend_options=self.settings.vector_backend_options,
             ).open()
         return self._store
 
@@ -611,17 +703,30 @@ class RagPipeline:
         )
 
     def index_stats(self) -> dict:
-        """Kennzahlen des Index, oder ein leeres Bild ohne Index."""
+        """Kennzahlen des Index, oder ein leeres Bild ohne Index.
+
+        Ein vorhandener, aber nicht öffenbarer Index — falsche Schema-Version,
+        fehlende Backend-Bibliothek — liefert hier ``error`` statt einer
+        Ausnahme. Die Oberfläche ruft das beim Aufbau jeder Seite auf; eine
+        Ausnahme wäre dort eine 500-Seite ohne Hinweis, was zu tun ist. Genau
+        das ist beim Sprung auf Schema-Version 2 passiert.
+        """
+        leer = {
+            "documents": 0,
+            "chunks": 0,
+            "vectors": 0,
+            "tokens": 0,
+            "path": str(self.settings.index_path),
+            "exists": False,
+        }
         if not self.settings.index_path.exists():
-            return {
-                "documents": 0,
-                "chunks": 0,
-                "vectors": 0,
-                "tokens": 0,
-                "path": str(self.settings.index_path),
-                "exists": False,
-            }
-        return {**self.store.stats(), "exists": True}
+            return leer
+
+        try:
+            return {**self.store.stats(), "exists": True}
+        except StoreError as exc:
+            logger.warning("Index nicht lesbar: %s", exc)
+            return {**leer, "exists": True, "error": str(exc)}
 
     # ─── Arbeit ──────────────────────────────────────────────────────────────
 
@@ -656,6 +761,65 @@ class RagPipeline:
             top_k=limit,
             min_score=self.settings.min_rerank_score,
         )
+
+    @staticmethod
+    def reusable_hits(history: Sequence[Turn]) -> list[SearchHit]:
+        """Die Quellen des ganzen Verlaufs, dedupliziert, jüngste zuerst.
+
+        Grundlage für die Wiederverwendung: eine Folgefrage darf sich auf
+        alles beziehen, was das Gespräch schon geholt hat, nicht nur auf die
+        letzte Antwort. Dedupliziert über ``chunk_id`` — dieselbe Stelle taucht
+        über mehrere Turns sonst mehrfach auf. Jüngste zuerst, damit bei
+        knappem Budget das zuletzt Besprochene erhalten bleibt.
+        """
+        gesehen: set[int] = set()
+        hits: list[SearchHit] = []
+        for turn in reversed(list(history)):
+            for source in turn.sources:
+                if source.hit.chunk_id not in gesehen:
+                    gesehen.add(source.hit.chunk_id)
+                    hits.append(source.hit)
+        return hits
+
+    def plan_retrieval(
+        self, question: str, history: Sequence[Turn]
+    ) -> tuple[RouteDecision, list[SearchHit]]:
+        """Entscheiden, ob neu gesucht wird — und wenn ja, womit.
+
+        Ohne Verlauf gibt es nichts wiederzuverwenden und nichts aufzulösen:
+        die Frage geht unverändert in die Suche, ohne Generatoraufruf. Das ist
+        der Normalfall der ersten Frage und soll nichts kosten.
+
+        Mit Verlauf entscheidet der Router in *einem* Aufruf: reichen die
+        vorliegenden Quellen (``reuse``), oder braucht es eine neue Suche — dann
+        mit der umgeschriebenen Query. Schlägt der Aufruf fehl, wird gesucht,
+        mit der Originalfrage; ein kaputter Router darf die Antwort nicht
+        verhindern.
+        """
+        reusable = self.reusable_hits(history)
+        if not history:
+            return RouteDecision(reuse=False, query=question), reusable
+
+        zitate = [hit.citation for hit in reusable]
+        try:
+            text, _, _ = self.generator.complete(
+                build_route_prompt(history, question, zitate),
+                # Kurz: ein Marker oder eine Suchquery, kein Absatz. Und
+                # deterministisch — das ist Entscheidung und Umformung, keine
+                # Erzeugung.
+                max_tokens=64,
+                temperature=0.0,
+            )
+        except GenerationError as exc:
+            logger.warning("Router fehlgeschlagen, suche mit Originalfrage: %s", exc)
+            return RouteDecision(reuse=False, query=question), reusable
+
+        decision = parse_route(text, question, allow_reuse=bool(reusable))
+        if decision.reuse:
+            logger.debug("Router: vorliegende Quellen reichen, keine neue Suche")
+        elif decision.query != question:
+            logger.debug("Router: neue Suche, umgeschrieben zu %r", decision.query)
+        return decision, reusable
 
     def ask(self, question: str, *, top_k: int | None = None) -> Answer:
         """Vollständige Antwort mit Quellen."""
@@ -694,25 +858,45 @@ class RagPipeline:
         )
 
     def ask_stream(
-        self, question: str, *, top_k: int | None = None
-    ) -> tuple[list, Iterator[str]]:
+        self,
+        question: str,
+        *,
+        top_k: int | None = None,
+        history: Sequence[Turn] = (),
+    ) -> tuple[list, Iterator[str], bool]:
         """Wie ``ask()``, aber die Antwort kommt stückweise.
 
-        Gibt (Quellen, Token-Strom) zurück. Die Quellen stehen sofort fest und
-        können angezeigt werden, während die Antwort noch entsteht — bei 5 bis
-        18 Token pro Sekunde ist das der Unterschied zwischen einer Anzeige
-        und einer Wartezeit.
-        """
-        hits = self.retrieve(question, top_k=top_k)
-        if not hits:
-            return [], iter([NO_CONTEXT_ANSWER])
+        Gibt (Quellen, Token-Strom, wiederverwendet) zurück. Die Quellen stehen
+        sofort fest und können angezeigt werden, während die Antwort noch
+        entsteht — bei 5 bis 18 Token pro Sekunde ist das der Unterschied
+        zwischen einer Anzeige und einer Wartezeit.
 
-        sources, _ = build_sources(
-            hits, context_tokens=self.settings.generator_context_length
-        )
+        ``history`` macht daraus einen Mehrturn-Chat. Ein Router entscheidet
+        vorab (``plan_retrieval``), ob die schon vorliegenden Quellen genügen:
+        dann wird nicht gesucht, sondern sie werden wiederverwendet
+        (``wiederverwendet=True``). Sonst wird mit der umgeschriebenen Query neu
+        gesucht. Ohne ``history`` verhält sich alles wie eine Einzelfrage.
+        """
+        decision, reusable = self.plan_retrieval(question, history)
+
+        if decision.reuse:
+            # Keine Vektorsuche, kein Reranking: die Quellen liegen schon vor,
+            # nur aufs Kontextbudget gekürzt und neu numeriert.
+            sources, _ = build_sources(
+                reusable, context_tokens=self.settings.generator_context_length
+            )
+        else:
+            hits = self.retrieve(decision.query, top_k=top_k)
+            if not hits:
+                return [], iter([NO_CONTEXT_ANSWER]), False
+            sources, _ = build_sources(
+                hits, context_tokens=self.settings.generator_context_length
+            )
+
         stream = self.generator.stream(
-            build_prompt(question, sources),
+            build_prompt(question, sources, history=history),
             max_tokens=self.settings.max_tokens,
             temperature=self.settings.temperature,
         )
-        return sources, stream
+        return sources, stream, decision.reuse
+

@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 from rag.detect import Platform, load_config, run_whichllm
 from rag.hfmeta import language_verdict
+from rag.vectors import BACKENDS, DEFAULT_BACKEND
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,11 @@ class PipelinePlan:
     reranker: ModelSpec | None
     gpu_reserved_bytes: int
     generator_budget_bytes: int
+    # Keine ModelSpec: das Vektor-Backend ist kein Modell, hat kein Gerät und
+    # kostet kein VRAM. Es steht hier, weil es zur Auflösung einer Pipeline
+    # gehört und 'rag plan' es zeigen soll.
+    vector_backend: str = DEFAULT_BACKEND
+    vector_backend_options: dict = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -392,6 +398,48 @@ def _resolve_static(
     )
 
 
+def resolve_vector_backend(
+    config: dict, class_config: dict | None = None
+) -> tuple[str, dict]:
+    """Namen und Optionen des Vektor-Backends aus der Konfiguration lesen.
+
+    Reihenfolge: Plattformklasse übersteuert den globalen Eintrag. Der Weg
+    über die Klasse existiert der Konsistenz wegen — die Wahl hängt an der
+    Absicht, nicht an der Hardware, deshalb steht sie normalerweise global.
+
+    Die Optionen sind backend-spezifisch und stammen aus dem Unterabschnitt
+    gleichen Namens, etwa ``[vector_store.qdrant]``.
+    """
+    section = config.get("vector_store", {})
+    name = str(
+        (class_config or {}).get("vector_backend")
+        or section.get("backend")
+        or DEFAULT_BACKEND
+    )
+
+    if name not in BACKENDS:
+        bekannt = ", ".join(BACKENDS)
+        raise ResolutionError(
+            f"platforms.toml nennt Vektor-Backend '{name}', "
+            f"bekannt sind: {bekannt}"
+        )
+
+    return name, backend_options(config, name)
+
+
+def backend_options(config: dict, name: str) -> dict:
+    """Optionen eines Backends aus ``[vector_store.<name>]``.
+
+    Getrennt von der Auflösung, weil die CLI das Backend auch per Flag setzt
+    und die Optionen dann trotzdem aus der Konfiguration kommen sollen.
+    """
+    section = config.get("vector_store", {})
+    # Nur echte Unterabschnitte: section["backend"] ist ein String, keine
+    # Optionstabelle, und darf hier nicht mitkommen.
+    raw = section.get(name)
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
 def resolve_pipeline(
     platform: Platform,
     *,
@@ -475,6 +523,8 @@ def resolve_pipeline(
             "Quantisierung muss manuell gewählt werden"
         )
 
+    vector_backend, vector_options = resolve_vector_backend(cfg, class_config)
+
     return PipelinePlan(
         platform=platform,
         platform_class=platform.platform_class,
@@ -483,5 +533,7 @@ def resolve_pipeline(
         reranker=reranker,
         gpu_reserved_bytes=reserved,
         generator_budget_bytes=budget or 0,
+        vector_backend=vector_backend,
+        vector_backend_options=vector_options,
         warnings=warnings,
     )

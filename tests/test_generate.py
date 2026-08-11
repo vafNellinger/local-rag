@@ -11,13 +11,17 @@ import pytest
 
 from rag.generate import (
     CONTEXT_BUDGET_SHARE,
+    REUSE_MARKER,
     SYSTEM_PROMPT,
     Answer,
     GenerationError,
     Source,
+    Turn,
     build_prompt,
+    build_route_prompt,
     build_sources,
     estimate_tokens,
+    parse_route,
     resolve_gpu_layers,
     supports_gpu_offload,
 )
@@ -115,6 +119,90 @@ class TestBuildPrompt:
 
     def test_antwortsprache_ist_deutsch(self):
         assert "Deutsch" in SYSTEM_PROMPT
+
+
+class TestBuildPromptMitVerlauf:
+    def test_ohne_verlauf_wie_bisher(self):
+        messages = build_prompt("Frage", [Source(1, hit("Text"))])
+        assert [m["role"] for m in messages] == ["system", "user"]
+
+    def test_verlauf_steht_als_wechsel_vor_der_frage(self):
+        history = [
+            Turn(question="Wie lang ist die Probezeit?", answer="Sechs Monate [1]."),
+        ]
+        messages = build_prompt(
+            "Und die Kündigungsfrist?", [Source(1, hit("Vier Wochen."))],
+            history=history,
+        )
+        # system, dann der alte Wechsel, dann die aktuelle Frage.
+        assert [m["role"] for m in messages] == [
+            "system", "user", "assistant", "user",
+        ]
+        assert messages[1]["content"] == "Wie lang ist die Probezeit?"
+        assert messages[2]["content"] == "Sechs Monate [1]."
+        # Die aktuelle Frage trägt die Quellen, die alte nicht.
+        assert "Vier Wochen." in messages[3]["content"]
+        assert "Quellen" not in messages[1]["content"]
+
+    def test_alte_quellen_kommen_nicht_wieder_mit(self):
+        # Der Verlauf trägt nur Frage und Antwort — sonst sprengt er nach ein
+        # paar Runden das Kontextbudget.
+        history = [Turn(question="F1", answer="A1 [1].")]
+        messages = build_prompt("F2", [Source(1, hit("NEUE_QUELLE"))], history=history)
+        assert "NEUE_QUELLE" not in messages[1]["content"]
+        assert "NEUE_QUELLE" not in messages[2]["content"]
+
+
+class TestRoutePrompt:
+    def test_verlauf_frage_und_quellen_stehen_drin(self):
+        history = [Turn(question="Wie viele Urlaubstage?", answer="30 [1].")]
+        messages = build_route_prompt(
+            history, "Und übertragbar?", ["urlaub.txt — Urlaubsanspruch"]
+        )
+        user = messages[1]["content"]
+        assert "Wie viele Urlaubstage?" in user
+        assert "30 [1]." in user
+        assert "Und übertragbar?" in user
+        assert "urlaub.txt — Urlaubsanspruch" in user
+
+    def test_ohne_quellen_steht_keine_da(self):
+        messages = build_route_prompt([Turn("F", "A")], "f2", [])
+        assert "(keine)" in messages[1]["content"]
+
+    def test_system_nennt_marker_und_beide_formen(self):
+        messages = build_route_prompt([Turn("F", "A")], "f2", ["x"])
+        system = messages[0]["content"]
+        assert messages[0]["role"] == "system"
+        assert REUSE_MARKER in system
+
+
+class TestParseRoute:
+    def test_marker_bedeutet_wiederverwenden(self):
+        d = parse_route(REUSE_MARKER, "Originalfrage", allow_reuse=True)
+        assert d.reuse is True
+        # Bei Wiederverwendung ist die Query irrelevant; die Originalfrage steht.
+        assert d.query == "Originalfrage"
+
+    def test_marker_mit_drumherum_wird_erkannt(self):
+        d = parse_route(f"{REUSE_MARKER}\n", "F", allow_reuse=True)
+        assert d.reuse is True
+
+    def test_marker_ohne_erlaubnis_sucht_mit_originalfrage(self):
+        # Sagt das Modell Wiederverwendung, obwohl keine Quellen da sind, darf
+        # daraus nie eine Query aus dem Marker-Wort werden.
+        d = parse_route(REUSE_MARKER, "Originalfrage", allow_reuse=False)
+        assert d.reuse is False
+        assert d.query == "Originalfrage"
+
+    def test_andere_ausgabe_ist_die_umgeschriebene_query(self):
+        d = parse_route("Kündigungsfrist Anstellungsvertrag", "F", allow_reuse=True)
+        assert d.reuse is False
+        assert d.query == "Kündigungsfrist Anstellungsvertrag"
+
+    def test_leere_ausgabe_faellt_auf_original(self):
+        d = parse_route("   ", "Originalfrage", allow_reuse=True)
+        assert d.reuse is False
+        assert d.query == "Originalfrage"
 
 
 class TestAnswer:

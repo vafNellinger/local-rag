@@ -198,6 +198,128 @@ class TestApply:
         assert pipeline._embedder is not None
 
 
+class StubGenerator:
+    """Ein Generator, der eine feste Antwort liefert und die Aufrufe merkt.
+
+    Genug, um ``plan_retrieval`` ohne llama.cpp zu prüfen: es zählt nur, was
+    der Router zurückgibt und was die Pipeline daraus macht.
+    """
+
+    def __init__(self, antwort: str = "umgeschriebene query") -> None:
+        self.antwort = antwort
+        self.aufrufe: list[list[dict]] = []
+
+    def complete(self, messages, *, max_tokens=0, temperature=0.0):
+        self.aufrufe.append(list(messages))
+        return self.antwort, 0, 0
+
+    def close(self):
+        # pipeline.close() schließt den Generator ausdrücklich.
+        pass
+
+
+def _turn(frage: str, antwort: str, *chunk_ids: int):
+    """Ein Verlaufseintrag mit Quellen an den gegebenen chunk_ids."""
+    from rag.generate import Source, Turn
+    from rag.store import SearchHit
+
+    sources = [
+        Source(
+            number=i + 1,
+            hit=SearchHit(
+                chunk_id=cid,
+                document_path=f"/doc{cid}.md",
+                ordinal=0,
+                text=f"Text {cid}",
+                heading_path=(),
+                kind="prosa",
+                distance=0.1,
+            ),
+        )
+        for i, cid in enumerate(chunk_ids)
+    ]
+    return Turn(question=frage, answer=antwort, sources=sources)
+
+
+class TestReusableHits:
+    def test_dedupliziert_ueber_den_verlauf(self):
+        history = [_turn("F1", "A1", 1, 2), _turn("F2", "A2", 2, 3)]
+        ids = [h.chunk_id for h in RagPipeline.reusable_hits(history)]
+        # Kein chunk_id doppelt, jüngster Turn zuerst.
+        assert ids == [2, 3, 1]
+
+    def test_ohne_quellen_leer(self):
+        history = [_turn("F", "A")]  # keine chunk_ids
+        assert RagPipeline.reusable_hits(history) == []
+
+
+class TestPlanRetrieval:
+    def _pipeline(self, tmp_path, stub):
+        pipeline = RagPipeline(Settings(index_path=tmp_path / "i.db"))
+        pipeline._generator = stub
+        return pipeline
+
+    def test_ohne_verlauf_keine_entscheidung(self, tmp_path):
+        # Erste Frage: nichts wiederzuverwenden, kein Generatoraufruf.
+        stub = StubGenerator()
+        pipeline = self._pipeline(tmp_path, stub)
+        decision, reusable = pipeline.plan_retrieval("Wie lang?", [])
+        assert decision.reuse is False
+        assert decision.query == "Wie lang?"
+        assert reusable == []
+        assert stub.aufrufe == []
+        pipeline.close()
+
+    def test_router_waehlt_wiederverwendung(self, tmp_path):
+        from rag.generate import REUSE_MARKER
+
+        stub = StubGenerator(REUSE_MARKER)
+        pipeline = self._pipeline(tmp_path, stub)
+        history = [_turn("Urlaubstage?", "30 Tage.", 1, 2)]
+        decision, reusable = pipeline.plan_retrieval("Fasse das zusammen.", history)
+        assert decision.reuse is True
+        assert [h.chunk_id for h in reusable] == [1, 2]
+        assert len(stub.aufrufe) == 1
+        pipeline.close()
+
+    def test_router_waehlt_neue_suche_mit_umschreibung(self, tmp_path):
+        stub = StubGenerator("Kündigungsfrist Anstellungsvertrag")
+        pipeline = self._pipeline(tmp_path, stub)
+        history = [_turn("Probezeit?", "Sechs Monate.", 1)]
+        decision, _ = pipeline.plan_retrieval("Und die Frist?", history)
+        assert decision.reuse is False
+        assert decision.query == "Kündigungsfrist Anstellungsvertrag"
+        pipeline.close()
+
+    def test_ohne_vorhandene_quellen_nie_wiederverwenden(self, tmp_path):
+        from rag.generate import REUSE_MARKER
+
+        # Verlauf ohne Quellen: selbst wenn das Modell den Marker sagt, muss
+        # gesucht werden — es gibt nichts wiederzuverwenden.
+        stub = StubGenerator(REUSE_MARKER)
+        pipeline = self._pipeline(tmp_path, stub)
+        history = [_turn("F", "A")]  # keine chunk_ids
+        decision, reusable = pipeline.plan_retrieval("Folgefrage", history)
+        assert decision.reuse is False
+        assert decision.query == "Folgefrage"
+        assert reusable == []
+        pipeline.close()
+
+    def test_fehler_im_router_sucht_mit_originalfrage(self, tmp_path):
+        from rag.generate import GenerationError
+
+        class Kaputt(StubGenerator):
+            def complete(self, *a, **k):
+                raise GenerationError("Modell weg")
+
+        pipeline = self._pipeline(tmp_path, Kaputt())
+        history = [_turn("F", "A", 1)]
+        decision, _ = pipeline.plan_retrieval("Originalfrage", history)
+        assert decision.reuse is False
+        assert decision.query == "Originalfrage"
+        pipeline.close()
+
+
 class TestReranker:
     def test_abgeschalteter_reranker_ist_none(self, tmp_path):
         pipeline = RagPipeline(
@@ -246,5 +368,26 @@ class TestIndexStats:
         pipeline = RagPipeline(Settings(index_path=pfad))
         stats = pipeline.index_stats()
         assert stats["exists"] is True
+        assert stats["documents"] == 0
+        pipeline.close()
+
+    def test_unlesbarer_index_meldet_statt_zu_werfen(self, tmp_path):
+        """Vorhanden, aber nicht öffenbar — und trotzdem keine Ausnahme.
+
+        Die Oberfläche ruft das beim Aufbau jeder Seite auf. Eine Ausnahme
+        wurde dort zu einer 500-Seite ohne Hinweis, was zu tun ist; genau das
+        ist beim Sprung auf Schema-Version 2 passiert.
+        """
+        # Ein Index mit fremdem Embedder: das Öffnen wird abgelehnt, und zwar
+        # zu Recht — Vektoren verschiedener Modelle sind nicht vergleichbar.
+        pfad = tmp_path / "i.db"
+        with IndexStore(pfad, embedder="modell/alt", dimensions=1024):
+            pass
+
+        pipeline = RagPipeline(Settings(index_path=pfad))
+        stats = pipeline.index_stats()
+
+        assert stats["exists"] is True
+        assert "nicht vergleichbar" in stats["error"]
         assert stats["documents"] == 0
         pipeline.close()

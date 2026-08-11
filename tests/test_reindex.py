@@ -249,6 +249,57 @@ class TestProfileConflict:
         assert pipeline.profile_conflict() is None
 
 
+class TestBackendConflict:
+    """Wie TestProfileConflict, nur für das Vektor-Backend.
+
+    Der Fehlerfall ist hier sogar leiser: bei einem Profilwechsel liefert die
+    Suche falsche Treffer, bei einem Backendwechsel gar keine — ein leerer
+    Vektorspeicher sieht aus wie ein kaputter Index.
+    """
+
+    def _index(self, pfad: Path, backend: str = "sqlite-vec") -> None:
+        with IndexStore(
+            pfad,
+            embedder="BAAI/bge-m3",
+            dimensions=1024,
+            profile="default",
+            vector_backend=backend,
+        ):
+            pass
+
+    def test_kein_konflikt_bei_gleichem_backend(self, tmp_path):
+        pfad = tmp_path / "index.db"
+        self._index(pfad)
+        pipeline = RagPipeline(
+            Settings(index_path=pfad, vector_backend="sqlite-vec")
+        )
+        assert pipeline.backend_conflict() is None
+        pipeline.close()
+
+    def test_konflikt_wird_gemeldet(self, tmp_path):
+        pfad = tmp_path / "index.db"
+        self._index(pfad)
+        pipeline = RagPipeline(Settings(index_path=pfad, vector_backend="lancedb"))
+        assert pipeline.backend_conflict() == ("sqlite-vec", "lancedb")
+        pipeline.close()
+
+    def test_index_gewinnt_und_sagt_es(self, tmp_path, caplog):
+        pfad = tmp_path / "index.db"
+        self._index(pfad)
+        pipeline = RagPipeline(Settings(index_path=pfad, vector_backend="lancedb"))
+        with caplog.at_level("WARNING"):
+            gewaehlt = pipeline._effective_vector_backend()
+        assert gewaehlt == "sqlite-vec"
+        assert any("neu aufgebaut" in r.message for r in caplog.records)
+        pipeline.close()
+
+    def test_ohne_index_kein_konflikt(self, tmp_path):
+        pipeline = RagPipeline(
+            Settings(index_path=tmp_path / "nichts.db", vector_backend="lancedb")
+        )
+        assert pipeline.backend_conflict() is None
+
+
 @pytest.mark.slow
 class TestRebuildIndex:
     """Der Neuaufbau selbst, Ende zu Ende.

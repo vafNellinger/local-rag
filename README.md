@@ -29,11 +29,43 @@ pipx install whichllm     # falls noch nicht vorhanden
 
 `llama-cpp-python` hat keine Wheels und kompiliert beim Installieren; ein
 C++-Compiler muss da sein, cmake zieht es sich selbst. Der so entstehende Build
-kann **nur CPU** — für GPU-Betrieb neu bauen, etwa mit
-`CMAKE_ARGS="-DGGML_VULKAN=ON" uv pip install --force-reinstall --no-cache-dir llama-cpp-python`.
-Ob der vorhandene Build auslagern kann, sagt `rag plan` beim Generator und die
-Modelle-Seite der Oberfläche; wo es nicht geht, steht dort `cpu` samt Grund
-statt einer GPU-Zusage, die nicht eingelöst wird.
+kann **nur CPU**. Ob der vorhandene Build auslagern kann, sagt `rag plan` beim
+Generator und die Modelle-Seite der Oberfläche; wo es nicht geht, steht dort
+`cpu` samt Grund statt einer GPU-Zusage, die nicht eingelöst wird.
+
+### GPU-Build (Vulkan)
+
+Vulkan statt ROCm, weil es ohne ROCm-Installation auf jeder Mesa-Karte läuft —
+auf AMD-iGPUs der einzige praktikable Weg. Der Build braucht mehr als die
+Vulkan-Runtime; ohne diese Pakete bricht CMake ab, teils erst nach Minuten:
+
+```bash
+sudo apt install cmake libvulkan-dev glslc spirv-headers glslang-tools pkg-config
+CMAKE_ARGS="-DGGML_VULKAN=ON" uv pip install --force-reinstall --no-cache-dir 'llama-cpp-python>=0.3'
+```
+
+`libvulkan1` allein genügt nicht — das sind die Header. `glslc` compiliert die
+Compute-Shader, `spirv-headers` liefert die `SPIRV-HeadersConfig.cmake`, die
+llama.cpp per `find_package` sucht.
+
+Gemessen auf Radeon 890M (Strix Point, RDNA 3.5): alle 37 Layer von
+Qwen3-4B-Instruct-2507 Q5_K_M auf der GPU, ~22 tok/s Generierung. RADV meldet
+dabei ~34 GB nutzbar (VRAM plus GTT), `detect.py` rechnet aber mit dem
+VRAM-Carve-out von 7,5 GB — bewusst konservativ, weil der Speicher geteilt ist.
+
+### Modelle liegen im Cache, nicht im Projekt
+
+Embedder, Reranker und der Generator-GGUF landen im HuggingFace-Cache
+(`~/.cache/huggingface/hub`) und werden **einmal** heruntergeladen, nicht bei
+jeder Anfrage. Ein Modell-Laden bestätigt das nur, statt es neu zu holen —
+`rag/hfload.py` lädt deshalb offline zuerst (`local_files_only`) und geht erst
+ins Netz, wenn eine Datei wirklich fehlt.
+
+Der HuggingFace-Client meldete dabei bei jeder Cache-Prüfung *„You are sending
+unauthenticated requests to the HF Hub"* — kein Download, nur ein ETag-Abgleich,
+und der Rat zu einem `HF_TOKEN` ist für ein lokales Werkzeug an öffentlichen
+Modellen nie umsetzbar. Genau diese eine Logmeldung filtert `hfload.py` heraus;
+echte Fehler des Clients bleiben sichtbar.
 
 ## Verwendung
 
@@ -51,15 +83,20 @@ rag convert scan.pdf --ocr    # OCR erzwingen statt automatisch entscheiden
 rag ingest ~/dokumente        # extrahieren, chunken, embedden, indizieren
 rag ingest ~/dokumente --prune   # verschwundene Dateien aus dem Index werfen
 rag ingest datei.pdf --force     # auch unverändert neu einlesen
-rag status                    # was liegt im Index
+rag ingest ~/dokumente --store lancedb   # anderes Vektor-Backend
+rag status                    # was liegt im Index, in welchem Backend
 rag search "Wie lang ist die Kündigungsfrist?"
 rag search "Löschfristen" -n 10 --full
+
+rag reindex                   # neu aufbauen, Extraktion aus dem Cache
+rag reindex --store qdrant    # Vektor-Backend wechseln
 
 rag pull                      # GGUF des geplanten Generators holen
 rag ask "Wie lang ist die Kündigungsfrist und was gilt bei Verzug?"
 rag ask "Löschfristen?" -k 3 --no-rerank
 
 rag gui                       # Oberfläche auf http://127.0.0.1:8080
+rag gui --reload              # bei Codeänderungen neu starten (Entwicklung)
 ```
 
 Ergebnisse werden 24 h in `~/.cache/local-rag/` gecacht; ein
@@ -204,18 +241,66 @@ wird er.
 
 ## Index
 
-SQLite plus [sqlite-vec](https://github.com/asg017/sqlite-vec), eine Datei,
-kein Server. Cosine-Distanz, weil bge-m3 normalisierte Vektoren liefert.
+SQLite für Dokumente, Chunk-Texte und Metadaten; die Vektorsuche liegt hinter
+einem austauschbaren Backend. Cosine-Distanz überall, weil bge-m3 normalisierte
+Vektoren liefert.
 
-Zwei Eigenschaften, die beide gegen einen *stillen* Fehler existieren:
+Drei Eigenschaften, die alle gegen einen *stillen* Fehler existieren:
 
 - **Der Index kennt sein Embedding-Modell.** Vektoren aus zwei Modellen im
   selben Raum liefern weiter Treffer, nur falsche. Modell, Dimension und
   Schema-Version stehen in `meta` und werden bei jedem Öffnen geprüft; ein
   Wechsel bricht mit Hinweis ab, statt schlechtere Ergebnisse zu liefern.
-- **Vektoren werden explizit mitgelöscht.** Die `vec0`-Tabelle hängt nicht am
-  `ON DELETE CASCADE` der Chunks. Ohne den eigenen Löschschritt bleiben
-  verwaiste Vektoren zurück, die auf nicht mehr existierende Chunks zeigen.
+- **Der Index kennt sein Vektor-Backend.** Aus demselben Grund und mit einem
+  noch leiseren Fehlerbild: ein umgestelltes Backend zeigt auf einen leeren
+  Vektorspeicher, die Suche läuft fehlerfrei und findet nichts. Steht ebenfalls
+  in `meta` und wird geprüft.
+- **Chunk-IDs werden nie wiederverwendet** (`AUTOINCREMENT`). Externe Backends
+  liegen nicht in der SQLite-Transaktion; eine wiederverwendete ID könnte dort
+  auf einen alten Vektor treffen, dessen Text inzwischen ein anderer ist. Mit
+  fortlaufenden IDs werden solche Reste zu Waisen, die beim Nachladen aus
+  SQLite wegfallen.
+
+### Welches Vektor-Backend
+
+Vier zur Auswahl, gewählt in `platforms.toml` unter `[vector_store]` oder per
+`--store`:
+
+| Backend | Ablage | Wann |
+|---|---|---|
+| `sqlite-vec` | in der Index-Datei | **Vorgabe.** Ein Index ist genau eine Datei. Bruteforce über alle Vektoren — bei einigen Tausend Chunks schnell genug. |
+| `lancedb` | `index.lance/` | Dateibasiert, aber mit echtem ANN-Index; ab etwa 10⁵ Chunks interessant. Kann Sparse und Dense gemeinsam halten, also später Hybrid-Retrieval mit bge-m3s Sparse-Ausgabe. |
+| `chromadb` | `index.chroma/` | Verbreitet und leicht zu inspizieren. Bringt eine eigene Metadatenhaltung mit, die hier ungenutzt bleibt. |
+| `qdrant` | `index.qdrant/` oder Server | Beste Filter- und Skalierungseigenschaften. Eingebettet sperrt es sein Verzeichnis exklusiv — CLI und Oberfläche können dann nicht gleichzeitig zugreifen. |
+
+Jedes Backend speichert nur `chunk_id` und Vektor; Text und Metadaten kommen
+weiterhin aus SQLite. Auch bei Chroma und Qdrant, die es könnten — zwei Quellen
+für dieselbe Wahrheit wären ein Sync-Problem ohne Gegenwert.
+
+Nur `sqlite-vec` ist mitinstalliert. Die anderen sind eigene Extras:
+
+```bash
+uv pip install -e '.[lancedb]'     # oder [chromadb], [qdrant]
+rag reindex --store lancedb        # baut die Vektoren um
+```
+
+Der Umbau kostet das Embedding neu, nicht die Extraktion — die kommt aus dem
+Cache. Vektoren zwischen Backends zu kopieren wäre möglich, aber der Gewinn
+gegenüber einem Reindex ist gering und die Fehlerquelle größer.
+
+Gemessen an 59 Chunks des Testkorpus liefern alle vier identische Treffer bei
+identischen Ähnlichkeitswerten. Das ist der Zweck von `tests/test_vectors.py`:
+derselbe Ablauf gegen jedes Backend. Was dort schiefgehen kann, geht still
+schief — ein Backend mit umgekehrter Distanzkonvention dreht die Reihenfolge,
+ohne dass etwas fehlschlägt. Qdrant liefert genau deshalb eine Ähnlichkeit, die
+umgerechnet wird.
+
+**Externe Backends werden erst nach dem SQLite-Commit geschrieben.** Sie können
+nicht an dessen Transaktion teilnehmen, also entscheidet die Reihenfolge, was
+ein Absturz hinterlässt: danach fehlen höchstens Vektoren zu vorhandenen Chunks
+(Treffer bleiben aus), davor gäbe es Vektoren zu Chunk-IDs, die inzwischen
+anderen Text tragen (Treffer werden falsch). `rag status` stellt Chunk- und
+Vektorzahl nebeneinander und warnt bei Abweichung.
 
 Ingest ist idempotent über den SHA-256 des Dateiinhalts, nicht über die mtime:
 Kopieren und Auspacken setzen die mtime neu, ohne dass sich etwas geändert hat.
@@ -381,6 +466,42 @@ lädt keinen Generator, eine Antwort ohne Reranking keinen Cross-Encoder. In der
 Oberfläche ist das der Unterschied zwischen einem benutzbaren Programm und
 dreißig Sekunden Startbildschirm.
 
+### Chat mit Verlauf
+
+Die Fragen-Seite ist ein Mehrturn-Chat: Frage und Antwort bleiben als Verlauf
+stehen, Folgefragen dürfen sich auf das Vorherige beziehen. „Und wie viele
+davon ins nächste Jahr?" funktioniert, weil die Folgefrage vor der Suche zu
+einer eigenständigen umgeschrieben wird — `condense_question()` in der Pipeline
+löst den Rückbezug über den Verlauf auf, gemessen etwa „Wie viele der 35
+Urlaubstage können ins nächste Jahr übertragen werden?". Ohne diesen Schritt
+sähe die Vektorsuche nur „davon" und fände nichts Passendes.
+
+Der Verlauf steht danach auch im Generator-Prompt, als echte
+Frage-Antwort-Wechsel vor der aktuellen Frage — aber **ohne** die damaligen
+Quellen. Die noch einmal einzubetten würde das Kontextfenster nach wenigen
+Runden sprengen; die Antworttexte tragen ihre Aussage auch ohne sie. Die
+Umschreibung kostet einen zusätzlichen, kurzen Generatoraufruf je Folgefrage —
+der Preis dafür, dass Folgefragen überhaupt treffen.
+
+Derselbe Aufruf entscheidet zugleich, ob überhaupt neu gesucht werden muss.
+Manche Folgefragen — „fasse das zusammen", „und der zweite Punkt?" — sind mit
+den schon geholten Quellen beantwortbar; eine neue Vektorsuche wäre dann
+verschwendet und streut im Zweifel breiter. Der Router (`plan_retrieval`) legt
+dem Modell den Verlauf und die Kurzbelege *aller* bisher gezeigten Quellen vor
+und lässt es wählen: reichen sie, kommt das Signalwort `QUELLEN_REICHEN` zurück
+und es wird ohne Suche und ohne Reranking mit den vorhandenen Quellen
+geantwortet (aufs Kontextbudget gekürzt, jüngste zuerst); sonst eine
+umgeschriebene Suchanfrage. Die Oberfläche vermerkt eine Wiederverwendung in
+der Meta-Zeile — sonst wirkte die ausbleibende Suchphase wie ein Fehler. Im
+Zweifel wird gesucht: eine überflüssige Suche kostet Zeit, eine ausgelassene
+die Antwort. Ein ungehorsames Modell, das Wiederverwendung ohne vorliegende
+Quellen behauptet, fällt hart auf eine normale Suche zurück.
+
+Der Verlauf lebt im Prozess: er überdauert den Wechsel zwischen den Seiten,
+aber keinen Neustart. „Neuer Chat" leert ihn. Das ist bewusst keine gespeicherte
+Konversation — ein Ein-Nutzer-Werkzeug braucht keine Chat-Datenbank, und der
+Index ist ohnehin die eine Sache, die bleibt.
+
 Einstellungen liegen in `~/.config/local-rag/settings.json` — die einzige Datei
 des Projekts, die echte Nutzereingabe enthält und nicht neu erzeugbar ist. Beim
 Laden legt sie sich über die Plattformvorgaben, statt sie zu ersetzen: ein neues
@@ -391,6 +512,39 @@ Mehrfachzugriff abgesichert (`check_same_thread=False` plus ein Lock im Store),
 weil der Event-Loop ihn für die Kennzahlen öffnet und ein Arbeitsthread darin
 sucht und schreibt — ein Fehler, der in der CLI nie auftritt, weil dort alles
 ein Thread ist.
+
+### Reload während der Entwicklung
+
+`rag gui --reload` startet den Server bei jeder Änderung unter `rag/` neu;
+offene Browser-Sitzungen verbinden sich von selbst wieder. Ohne das Flag bleibt
+es beim alten Verhalten — für den Normalbetrieb ist ein Watcher nur Overhead.
+
+Der Umweg dahinter ist keiner: `--reload` startet `python -m rag.guiapp` als
+Unterprozess, statt selbst `ui.run(reload=True)` aufzurufen. uvicorns Reloader
+erzeugt den Arbeitsprozess über multiprocessing-spawn, und der importiert das
+Hauptmodul erneut — unter dem Namen `__mp_main__`. Bei einem Console-Script ist
+das Hauptmodul der von pip erzeugte Wrapper:
+
+```python
+from rag.cli import app
+if __name__ == "__main__":
+    sys.exit(app())
+```
+
+Im Kindprozess greift dieser Guard nicht. Der Befehl läuft dort also nie,
+`rag.ui` wird nie importiert, keine `@ui.page` ist registriert, und NiceGUI
+bricht ab mit *„You must call ui.run() to start the server"* — genau so
+gemessen, bevor `rag/guiapp.py` entstand. Dieses Modul hat deshalb absichtlich
+keinen Main-Guard und liest seine Parameter aus der Umgebung statt aus
+`sys.argv`: spawn erbt die Umgebung, nicht die Argumentliste. NiceGUI löst Host
+und Port intern genauso.
+
+Überwacht wird das Paketverzeichnis, nicht das Arbeitsverzeichnis. NiceGUIs
+Vorgabe ist `.` — wer die Oberfläche aus einem Dokumentenordner startet, würde
+damit nichts vom Code sehen, dafür jede neue PDF als Codeänderung.
+
+Modelle überleben einen Reload nicht. Das kostet aber wenig, weil sie ohnehin
+erst beim Gebrauch geladen werden.
 
 ### Protokoll
 

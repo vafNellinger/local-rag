@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 
@@ -39,7 +40,13 @@ from rag.generate import NO_CONTEXT_ANSWER, GenerationError, gguf_path
 from rag.ingest import IngestReport, ingest_paths, search_index
 from rag.pipeline import SETTINGS_PATH, PipelineError, RagPipeline, Settings
 from rag.rerank import RerankError
-from rag.resolve import PipelinePlan, ResolutionError, resolve_pipeline
+from rag.resolve import (
+    PipelinePlan,
+    ResolutionError,
+    backend_options,
+    resolve_pipeline,
+    resolve_vector_backend,
+)
 from rag.store import (
     DEFAULT_INDEX_NAME,
     IndexStore,
@@ -47,6 +54,7 @@ from rag.store import (
     read_index_documents,
     read_index_meta,
 )
+from rag.vectors import BACKENDS, sidecar_for
 
 app = typer.Typer(
     add_completion=False,
@@ -140,6 +148,12 @@ def _render(plan: PipelinePlan) -> None:
         )
     if plan.generator.context_length:
         console.print(f"  Kontext: [dim]{plan.generator.context_length} Token[/]")
+
+    ziel = plan.vector_backend_options.get("url") or "eingebettet"
+    console.print(
+        f"  Vektoren: [dim]{plan.vector_backend}[/]"
+        + (f" [dim]({ziel})[/]" if plan.vector_backend == "qdrant" else "")
+    )
 
     if plan.platform.has_gpu:
         console.print(
@@ -377,8 +391,33 @@ def _choose_embedder(
     return EmbedderChoice(chosen_profile, chosen_device, origin)
 
 
+def _choose_backend(index: Path, explicit: str | None) -> tuple[str, dict]:
+    """Vektor-Backend bestimmen, in derselben Rangfolge wie beim Embedder.
+
+    1. Was der Anwender per ``--store`` angibt.
+    2. Was im Index steht — die Vektoren liegen dort und nirgends sonst.
+    3. ``[vector_store]`` aus ``platforms.toml``.
+
+    Die Optionen kommen immer aus der Konfiguration, auch bei einer Angabe per
+    Flag: eine Qdrant-Adresse will niemand als Kommandozeilenparameter
+    wiederholen.
+    """
+    config = load_config()
+    name = explicit or read_index_meta(index).get("vector_backend")
+    if not name:
+        name, _ = resolve_vector_backend(config)
+    if name not in BACKENDS:
+        bekannt = ", ".join(BACKENDS)
+        raise StoreError(f"Unbekanntes Vektor-Backend '{name}'. Bekannt: {bekannt}")
+    return name, backend_options(config, name)
+
+
 def _open_store(
-    index: Path, profile: str, *, device: str = "auto"
+    index: Path,
+    profile: str,
+    *,
+    device: str = "auto",
+    backend: str | None = None,
 ) -> tuple[IndexStore, Embedder]:
     """Index und Embedder passend zueinander öffnen.
 
@@ -388,11 +427,14 @@ def _open_store(
     """
     config = load_embedder_config(profile)
     embedder = Embedder(config, device=device)
+    backend_name, options = _choose_backend(index, backend)
     store = IndexStore(
         index,
         embedder=config.model_id,
         dimensions=config.dimensions,
         profile=profile,
+        vector_backend=backend_name,
+        backend_options=options,
     ).open()
     return store, embedder
 
@@ -461,6 +503,12 @@ def ingest(
         "--device",
         help="cpu, gpu, cuda oder mps; ohne Angabe aus der Plattformklasse",
     ),
+    store_backend: str | None = typer.Option(
+        None,
+        "--store",
+        help=f"Vektor-Backend ({', '.join(BACKENDS)}); "
+        "ohne Angabe aus Index oder platforms.toml",
+    ),
     force: bool = typer.Option(
         False, "--force", help="Auch unveränderte Dateien neu einlesen"
     ),
@@ -482,7 +530,9 @@ def ingest(
 
     try:
         choice = _choose_embedder(index, profile, device)
-        store, embedder = _open_store(index, choice.profile, device=choice.device)
+        store, embedder = _open_store(
+            index, choice.profile, device=choice.device, backend=store_backend
+        )
     except (StoreError, EmbeddingError, WhichllmError) as exc:
         console.print(f"[red]Fehler:[/] {exc}")
         raise typer.Exit(1) from exc
@@ -490,7 +540,8 @@ def ingest(
     console.print(
         f"[dim]Index:[/] {index}\n"
         f"[dim]Embedder:[/] {embedder.config.model_id} auf {embedder.device} "
-        f"[dim]({choice.profile}, {choice.origin})[/]"
+        f"[dim]({choice.profile}, {choice.origin})[/]\n"
+        f"[dim]Vektoren:[/] {store.vector_backend}"
     )
 
     # Der erste Lauf lädt das Modell — ohne Hinweis sieht die Pause wie ein
@@ -534,6 +585,12 @@ def search(
     device: str | None = typer.Option(
         None, "--device", help="cpu, gpu, cuda oder mps"
     ),
+    store_backend: str | None = typer.Option(
+        None,
+        "--store",
+        help=f"Vektor-Backend ({', '.join(BACKENDS)}); "
+        "ohne Angabe aus dem Index",
+    ),
     limit: int = typer.Option(5, "-n", "--limit", help="Zahl der Treffer"),
     full: bool = typer.Option(False, "--full", help="Chunks vollständig zeigen"),
     verbose: bool = typer.Option(False, "-v", "--verbose", help="Debug-Ausgabe"),
@@ -559,7 +616,7 @@ def search(
 
     try:
         store, embedder = _open_store(
-            index, resolved_profile, device=device or "auto"
+            index, resolved_profile, device=device or "auto", backend=store_backend
         )
     except (StoreError, EmbeddingError) as exc:
         console.print(f"[red]Fehler:[/] {exc}")
@@ -595,6 +652,12 @@ def status(
     index: Path | None = typer.Option(
         None, "--index", help="Index-Datei; ohne Angabe aus den Einstellungen"
     ),
+    store_backend: str | None = typer.Option(
+        None,
+        "--store",
+        help=f"Vektor-Backend ({', '.join(BACKENDS)}); "
+        "ohne Angabe aus dem Index",
+    ),
 ) -> None:
     """Zeige, was im Index liegt."""
     index = _resolve_index(index)
@@ -605,7 +668,7 @@ def status(
     profile = read_index_meta(index).get("embedder_profile", "default")
 
     try:
-        store, _ = _open_store(index, profile)
+        store, _ = _open_store(index, profile, backend=store_backend)
     except (StoreError, EmbeddingError) as exc:
         console.print(f"[red]Fehler:[/] {exc}")
         raise typer.Exit(1) from exc
@@ -630,6 +693,22 @@ def status(
         f"  Embedder: [cyan]{stats['embedder']}[/] "
         f"({stats['dimensions']} Dimensionen, Profil {stats['profile']})"
     )
+
+    sidecar = sidecar_for(index, str(stats["vector_backend"]))
+    ort = f", {sidecar.name}" if sidecar else ", in der Index-Datei"
+    console.print(f"  Vektoren: [cyan]{stats['vector_backend']}[/] ({stats['vectors']}{ort})")
+
+    # Jeder Chunk braucht genau einen Vektor. Weicht das ab, ist ein Ingest
+    # abgebrochen, nachdem SQLite schon geschrieben hatte — die betroffenen
+    # Chunks sind vorhanden, aber unauffindbar. Stillschweigend wäre das ein
+    # unerklärlich schlechtes Retrieval.
+    if stats["vectors"] != stats["chunks"]:
+        differenz = int(stats["chunks"]) - int(stats["vectors"])
+        console.print(
+            f"  [yellow]![/] {abs(differenz)} Chunk(s) "
+            f"{'ohne Vektor' if differenz > 0 else 'zu viele Vektoren'} — "
+            f"'rag reindex' baut den Index sauber neu auf"
+        )
 
     if documents:
         table = Table(show_lines=False)
@@ -802,6 +881,11 @@ def reindex(
     profile: str | None = typer.Option(
         None, "--profile", help="Embedder-Profil, mit dem neu gebaut wird"
     ),
+    store_backend: str | None = typer.Option(
+        None,
+        "--store",
+        help=f"Vektor-Backend, mit dem neu gebaut wird ({', '.join(BACKENDS)})",
+    ),
     clear_cache: bool = typer.Option(
         False,
         "--clear-cache",
@@ -814,6 +898,11 @@ def reindex(
     Die Dateiliste kommt aus dem bestehenden Index. Die Extraktion wird aus
     dem Cache wiederverwendet, sofern die Dateien unverändert sind — bei einem
     Modellwechsel ändert sich nur das Embedding.
+
+    Auch der Weg zum Wechsel des Vektor-Backends: ``--store lancedb`` baut die
+    Vektoren im neuen Backend auf und räumt das alte weg. Die Extraktion
+    entfällt dabei komplett, das Embedding nicht — Vektoren lassen sich nicht
+    zwischen Backends kopieren, ohne sie zu kennen.
     """
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
@@ -839,12 +928,26 @@ def reindex(
         console.print(f"[red]Fehler:[/] {exc}")
         raise typer.Exit(1) from exc
 
+    altes_backend = stored.get("vector_backend", "?")
+    try:
+        # Ohne --store das Backend des Index behalten, nicht das aus der
+        # Konfiguration: ein reiner Embedder-Wechsel soll den Speicherort der
+        # Vektoren nicht mitverändern.
+        neues_backend, _ = _choose_backend(index, store_backend)
+    except StoreError as exc:
+        console.print(f"[red]Fehler:[/] {exc}")
+        raise typer.Exit(1) from exc
+
     console.print()
     console.print(
         f"  bisher: [cyan]{stored.get('embedder', '?')}[/] "
-        f"[dim](Profil {stored.get('embedder_profile', '?')})[/]"
+        f"[dim](Profil {stored.get('embedder_profile', '?')}, "
+        f"Vektoren {altes_backend})[/]"
     )
-    console.print(f"  neu:    [cyan]{config.model_id}[/] [dim](Profil {ziel})[/]")
+    console.print(
+        f"  neu:    [cyan]{config.model_id}[/] "
+        f"[dim](Profil {ziel}, Vektoren {neues_backend})[/]"
+    )
     console.print(f"  {len(known)} Dokument(e) werden neu aufgenommen")
 
     if clear_cache:
@@ -865,6 +968,8 @@ def reindex(
             Settings.load(fallback=Settings.for_platform()),
             index_path=index,
             embedder_profile=ziel,
+            vector_backend=neues_backend,
+            vector_backend_options=backend_options(load_config(), neues_backend),
         )
     except WhichllmError as exc:
         console.print(f"[red]Fehler:[/] {exc}")
@@ -1082,6 +1187,16 @@ def gui(
     no_browser: bool = typer.Option(
         False, "--no-browser", help="Browser nicht automatisch öffnen"
     ),
+    native: bool = typer.Option(
+        False,
+        "--native",
+        help="Als eigenständiges Fenster öffnen statt im Browser",
+    ),
+    reload: bool = typer.Option(
+        False,
+        "--reload",
+        help="Bei Codeänderungen neu starten (für die Entwicklung)",
+    ),
     verbose: bool = typer.Option(False, "-v", "--verbose", help="Debug-Ausgabe"),
 ) -> None:
     """Starte die grafische Oberfläche."""
@@ -1094,13 +1209,65 @@ def gui(
         raise typer.Exit(1) from exc
 
     console.print(f"[dim]Protokoll:[/] {LOG_PATH}")
+
+    if reload:
+        if native:
+            # Der native Modus hält das Fenster im Hauptthread; uvicorns
+            # Reload-Kindprozess kann es nicht bedienen. Reload ist ohnehin ein
+            # Entwicklungswerkzeug — dort bleibt es beim Browser.
+            console.print(
+                "[yellow]--native und --reload zusammen nicht möglich — "
+                "Reload läuft im Browser.[/]"
+            )
+        # Nicht hier weiterlaufen: uvicorns Reloader importiert im Kindprozess
+        # das Hauptmodul erneut, und das ist bei einem Console-Script der
+        # pip-Wrapper mit seinem Main-Guard — die Seiten würden dort nie
+        # registriert. rag/guiapp.py ist genau dafür da; die Begründung steht
+        # in seinem Modulkopf.
+        raise typer.Exit(
+            _run_with_reload(
+                index=index, host=host, port=port, browser=not no_browser,
+                verbose=verbose,
+            )
+        )
+
     run(
         index_path=index,
         host=host,
         port=port,
         open_browser=not no_browser,
+        native=native,
         verbose=verbose,
     )
+
+
+def _run_with_reload(
+    *, index: Path | None, host: str, port: int, browser: bool, verbose: bool
+) -> int:
+    """``python -m rag.guiapp`` starten und dessen Rückgabewert liefern.
+
+    Die Parameter gehen über die Umgebung, nicht über die Argumentliste: der
+    Reload-Kindprozess entsteht per multiprocessing-spawn und erbt die Umgebung,
+    aber nicht ``sys.argv``.
+    """
+    import subprocess
+    import sys
+
+    env = {
+        **os.environ,
+        "LOCAL_RAG_GUI_HOST": host,
+        "LOCAL_RAG_GUI_PORT": str(port),
+        "LOCAL_RAG_GUI_BROWSER": "1" if browser else "0",
+        "LOCAL_RAG_GUI_VERBOSE": "1" if verbose else "0",
+    }
+    if index is not None:
+        env["LOCAL_RAG_GUI_INDEX"] = str(index)
+
+    console.print("[dim]Reload aktiv — Änderungen unter rag/ starten neu.[/]")
+    try:
+        return subprocess.call([sys.executable, "-m", "rag.guiapp"], env=env)
+    except KeyboardInterrupt:  # pragma: no cover
+        return 0
 
 
 if __name__ == "__main__":
