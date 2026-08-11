@@ -47,6 +47,43 @@ class TestOfflineFirst:
         with pytest.raises(RuntimeError, match="auch online kaputt"):
             load_offline_first(build, was="X")
 
+    def test_offline_versuch_erzwingt_offline_schalter(self, monkeypatch):
+        import os
+
+        monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+        monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
+        gesehen: dict[bool, dict[str, str | None]] = {}
+
+        def build(offline):
+            gesehen[offline] = {
+                "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE"),
+                "TRANSFORMERS_OFFLINE": os.environ.get("TRANSFORMERS_OFFLINE"),
+            }
+            if offline:
+                raise OSError("nicht im Cache")
+            return "geladen"
+
+        load_offline_first(build, was="X")
+        # Der Offline-Versuch sah beide Schalter gesetzt …
+        assert gesehen[True] == {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
+        # … der Netz-Fallback keinen, sonst käme kein Download zustande.
+        assert gesehen[False] == {"HF_HUB_OFFLINE": None, "TRANSFORMERS_OFFLINE": None}
+
+    def test_schalter_werden_nach_dem_laden_zurueckgesetzt(self, monkeypatch):
+        import os
+
+        monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+        load_offline_first(lambda offline: "m", was="X")
+        assert "HF_HUB_OFFLINE" not in os.environ
+
+    def test_vorhandener_schalter_bleibt_unveraendert(self, monkeypatch):
+        import os
+
+        # Ein bewusst gesetztes Offline-Flag darf nicht verloren gehen.
+        monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+        load_offline_first(lambda offline: "m", was="X")
+        assert os.environ["HF_HUB_OFFLINE"] == "0"
+
 
 class TestHintFilter:
     def _record(self, msg: str) -> logging.LogRecord:
