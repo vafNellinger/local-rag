@@ -8,3 +8,7 @@ testdaten/korpus/
 
 # Gebaute Pakete (build-deb.sh / NSIS)
 dist/
+
+# Kein uv sync im Auslieferungspfad (Starter nutzen uv pip install), daher
+# ungenutzt und nicht versioniert.
+uv.lock
