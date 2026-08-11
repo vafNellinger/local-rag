@@ -297,3 +297,45 @@ class TestIds:
         zweite = store.search(X, limit=1)[0].chunk_id
 
         assert zweite > erste
+
+
+class TestWalCheckpoint:
+    """Beim Schließen muss das WAL in die Hauptdatei zurückgeschrieben werden.
+
+    Bei einem externen Vektor-Backend liegen die Vektoren woanders, das
+    SQLite-WAL bleibt klein und erreicht die automatische Checkpoint-Schwelle
+    nie. Ohne erzwungenen Checkpoint behält die ``.db``-Datei dann einen
+    veralteten Stand, und ein read-only-Leser (``status``, ``read_index_meta``)
+    zählt zu wenig. Siehe ``IndexStore._checkpoint``.
+    """
+
+    def test_checkpoint_leert_das_wal(self, tmp_path):
+        pfad = tmp_path / "index.db"
+        store = IndexStore(
+            pfad, embedder="test/modell", dimensions=DIMENSIONS
+        ).open()
+        store.replace_document(
+            "/tmp/a.txt",
+            sha256="a" * 64,
+            format="txt",
+            chunks=chunks("eins", "zwei"),
+            embeddings=[X, Y],
+        )
+        wal = tmp_path / "index.db-wal"
+        # Vor dem Checkpoint steht der Schreibvorgang noch im WAL — zu wenig
+        # Daten, um die automatische Schwelle zu erreichen.
+        assert wal.exists() and wal.stat().st_size > 0
+        store._checkpoint()
+        # TRUNCATE schreibt es zurück und schrumpft die Datei auf null.
+        assert wal.stat().st_size == 0
+        store.close()
+
+    def test_close_ruft_checkpoint(self, tmp_path, monkeypatch):
+        pfad = tmp_path / "index.db"
+        store = IndexStore(
+            pfad, embedder="test/modell", dimensions=DIMENSIONS
+        ).open()
+        gerufen: list[bool] = []
+        monkeypatch.setattr(store, "_checkpoint", lambda: gerufen.append(True))
+        store.close()
+        assert gerufen == [True]

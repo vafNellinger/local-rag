@@ -296,8 +296,30 @@ class IndexStore:
         with self._lock:
             self.vectors.close()
             if self._connection is not None:
+                self._checkpoint()
                 self._connection.close()
                 self._connection = None
+
+    def _checkpoint(self) -> None:
+        """Das WAL in die Hauptdatei zurückschreiben, bevor die Verbindung geht.
+
+        Ohne das behält die ``.db``-Datei bei einem externen Vektor-Backend
+        einen veralteten Stand: dort liegen die Vektoren woanders, das
+        SQLite-WAL bleibt klein und erreicht die automatische
+        Checkpoint-Schwelle nie. Ein read-only-Leser (``status``,
+        ``read_index_meta``, ``read_index_documents``) kann ein nicht
+        angewandtes WAL nicht mitlesen und zählt zu wenig. Bei sqlite-vec fiel
+        das nie auf, weil die Vektoren das WAL über die Schwelle treiben.
+
+        TRUNCATE statt PASSIVE: schrumpft die ``-wal``-Datei auf null, statt sie
+        in voller Größe liegen zu lassen. Scheitert der Checkpoint, weil noch
+        ein Leser das WAL hält, ist das kein Grund, ``close()`` zu sprengen —
+        der nächste Schreiber holt es nach.
+        """
+        try:
+            self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error:
+            pass
 
     @property
     def connection(self) -> sqlite3.Connection:
