@@ -264,15 +264,19 @@ class LanceDBBackend:
     def search(
         self, vector: Sequence[float], limit: int
     ) -> list[tuple[int, float]]:
+        # "_distance" ausdrücklich mitwählen: wählt man Spalten aus, ohne sie zu
+        # nennen, hängt Lance sie noch automatisch an — aber unter einer
+        # Deprecation-Warnung pro Query, und künftig gar nicht mehr. Da wir den
+        # Wert unten brauchen, fordern wir ihn explizit an.
         treffer = (
             self.table.search([float(x) for x in vector])
             .metric("cosine")
             .limit(limit)
-            .select(["chunk_id"])
+            .select(["chunk_id", "_distance"])
             .to_list()
         )
-        # Lance nennt die Spalte "_distance" und liefert bei metric=cosine
-        # bereits 1 - Ähnlichkeit, also dieselbe Konvention wie sqlite-vec.
+        # Lance liefert bei metric=cosine in "_distance" bereits 1 - Ähnlichkeit,
+        # also dieselbe Konvention wie sqlite-vec.
         return [(int(t["chunk_id"]), float(t["_distance"])) for t in treffer]
 
     def count(self) -> int:
