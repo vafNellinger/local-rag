@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=local-rag
+Comment=Lokales RAG-System — Fragen an eigene Dokumente
+Exec=local-rag
+Icon=utilities-terminal
+Terminal=true
+Categories=Utility;Office;

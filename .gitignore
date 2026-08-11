@@ -5,3 +5,6 @@ __pycache__/
 data/
 .playwright-mcp/
 testdaten/korpus/
+
+# Gebaute Pakete (build-deb.sh / NSIS)
+dist/
