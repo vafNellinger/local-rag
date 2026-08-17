@@ -1,9 +1,23 @@
-# Nachtprotokoll — Strang 1 (GPU-Embedding via ONNX)
+# Nachtprotokoll — autonome Arbeit 2026-08-18
 
-Autonome Arbeit in der Nacht auf 2026-08-18. Fokus: Strang 1 tief und sauber.
-Reihenfolge nach dem Fahrplan, verifiziert auf **CPU** (diese Umgebung hat keine
-nutzbare GPU — die GPU-Messung ist der erste Schritt am Morgen auf echter
-Hardware).
+Über Nacht bearbeitet, alles committet und nach `origin` gepusht. Verifiziert auf
+**CPU** — diese Umgebung hat keine nutzbare GPU, die GPU-Messungen sind dein
+erster Schritt am Morgen.
+
+## Überblick
+
+| Strang | Ergebnis |
+|---|---|
+| **1 — GPU-Embedding via ONNX** | ✅ vollständig: austauschbare ONNX-Engine für Embedding + Reranking, bit-identisch zu sentence-transformers, getestet |
+| **5 — App-Reife (Datenpfade)** | ✅ vollständig: plattformkorrekte Pfade via platformdirs + Migration |
+| **3 — native GUI** | ✅ war bereits erledigt (Launcher nutzen `--native`, Browser-Fallback) |
+| INT8-Vertiefung | 📊 gemessen: schneller + 4× kleiner, aber −1,6 % Recall — als opt-in-Werkzeug |
+| **2 — GPU-LLM**, **4 — Bundle** | ⏸️ brauchen echte GPU-/Cross-Platform-Hardware + Signing-Accounts |
+
+6 Commits (`c96625c`-Bereich … `e770912`). Volle Testsuite grün (434 passed).
+Details je Strang unten.
+
+## Strang 1 — GPU-Embedding via ONNX (Detail)
 
 ## Erledigt und verifiziert
 
