@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=local-rag
+Comment=Lokales RAG-System – Fragen zu eigenen Dokumenten, offline
+Comment[en]=Local RAG system – ask questions about your own documents, offline
+Exec=/opt/local-rag/local-rag
+Icon=local-rag
+Terminal=false
+Categories=Office;Utility;
+Keywords=RAG;Dokumente;Suche;KI;
+StartupNotify=true

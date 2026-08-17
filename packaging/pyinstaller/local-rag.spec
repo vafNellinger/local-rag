@@ -10,6 +10,7 @@
 # hier ergänzt.
 
 import os
+import sys
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
@@ -48,6 +49,33 @@ for pkg in (
 # torch/transformers haben brauchbare Built-in-Hooks; nur die dynamisch
 # geladenen Submodule sicherheitshalber ergänzen.
 hiddenimports += collect_submodules("transformers")
+
+# pywebview öffnet auf Linux sein Fenster über GTK/WebKit — angesprochen via
+# PyGObject (gi). Ohne das im Bundle fällt die Oberfläche auf den Browser
+# zurück (siehe rag/ui._webview_verfuegbar). Der eingebaute gi-Hook zieht die
+# GObject-Introspection-Typelibs; die konkret genutzten Namespaces müssen als
+# hiddenimport bekannt sein, damit WebKit2 mitkommt. Die schweren nativen
+# GTK/WebKit-Bibliotheken selbst werden NICHT gebündelt — sie kommen als
+# System-Abhängigkeit über das .deb (Depends), das ist auf Debian robuster als
+# der Versuch, den ganzen WebKit-Prozessbaum einzupacken.
+if sys.platform.startswith("linux"):
+    hiddenimports += [
+        "gi",
+        "gi.repository.GLib",
+        "gi.repository.Gio",
+        "gi.repository.GObject",
+        "gi.repository.Gtk",
+        "gi.repository.Gdk",
+        "gi.repository.WebKit2",
+        "gi.repository.Soup",
+    ]
+    try:
+        d, b, h = collect_all("gi")
+        datas += d
+        binaries += b
+        hiddenimports += h
+    except Exception as exc:
+        print(f"collect_all(gi) übersprungen: {exc}")
 
 # Projekt-Konfiguration muss ins Bundle (Modelle/Geräte pro Plattformklasse).
 datas += [(os.path.join(_ROOT, "config", "platforms.toml"), "config")]
@@ -89,3 +117,24 @@ coll = COLLECT(
     upx=False,
     name="local-rag",
 )
+
+# Auf macOS wird aus dem Verzeichnis-Bundle zusätzlich ein .app-Paket — nur so
+# lässt es sich per Doppelklick starten und in ein .dmg legen. Der Launcher
+# öffnet ein natives Fenster (WKWebView), deshalb keine Menüleiste erzwingen.
+if sys.platform == "darwin":
+    app = BUNDLE(
+        coll,
+        name="local-rag.app",
+        icon=None,
+        bundle_identifier="de.vonaffenfels.local-rag",
+        info_plist={
+            "CFBundleName": "local-rag",
+            "CFBundleDisplayName": "local-rag",
+            "CFBundleShortVersionString": "0.1.0",
+            "CFBundleVersion": "0.1.0",
+            "NSHighResolutionCapable": True,
+            "LSMinimumSystemVersion": "12.0",
+            # Ein reines Fenster-Programm, kein Dock-loses Hintergrundtool.
+            "LSBackgroundOnly": False,
+        },
+    )

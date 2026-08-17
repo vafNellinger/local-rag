@@ -1,9 +1,14 @@
 name: Build desktop bundles
 
-# Baut auf GitHubs kostenlosen Runnern (öffentliches Repo) ein PyInstaller-Bundle
-# je Betriebssystem. Erster Wurf: liefert die gepackte App als Artefakt. Die
-# Wizard-Installer (NSIS/.dmg/.deb) und die Signierung kommen als nächste
-# Schritte obendrauf. Manuell auslösbar und bei Versions-Tags.
+# Baut auf GitHubs kostenlosen Runnern je Betriebssystem ein PyInstaller-Bundle
+# und daraus einen per Wizard installierbaren Installer:
+#   Linux   → .deb            (Bundle nach /opt, Menü-Eintrag, WebKit als Depends)
+#   Windows → NSIS-Setup.exe  (Per-User, Startmenü, Deinstaller)
+#   macOS   → .dmg            (.app zum Ziehen nach /Programme)
+# Signierung passiert optional, sobald die passenden Secrets hinterlegt sind
+# (siehe docs/standalone-app/06-installer-signing.md) — ohne Secrets bleibt der
+# Installer unsigniert, der Build läuft trotzdem durch.
+# Manuell auslösbar und bei Versions-Tags.
 
 on:
   workflow_dispatch:
@@ -37,49 +42,158 @@ jobs:
         with:
           python-version: "3.12"
 
-      # pywebview braucht auf Linux die WebKitGTK-Bindung.
+      - name: Version bestimmen
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            V="${{ github.ref_name }}"; V="${V#v}"
+          else
+            V="0.1.0"
+          fi
+          echo "APP_VERSION=$V" >> "$GITHUB_ENV"
+          echo "Version: $V"
+
+      # --- System-Abhängigkeiten -------------------------------------------
+      # Linux: PyGObject/WebKit fürs native Fenster, dpkg/fakeroot fürs .deb.
       - name: System-Abhängigkeiten (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libgirepository1.0-dev gir1.2-webkit2-4.1 libwebkit2gtk-4.1-0 || true
+            libgirepository1.0-dev libcairo2-dev pkg-config \
+            gir1.2-webkit2-4.1 libwebkit2gtk-4.1-0 \
+            fakeroot dpkg-dev || true
 
+      # Windows: NSIS für den Setup-Wizard.
+      - name: NSIS installieren (Windows)
+        if: runner.os == 'Windows'
+        run: choco install nsis -y --no-progress
+
+      # --- Python-Abhängigkeiten -------------------------------------------
       - name: Python-Abhängigkeiten
         run: |
           python -m pip install --upgrade pip
           if [ "${{ runner.os }}" = "macOS" ]; then
             # Das vorkompilierte macos-arm64-Wheel vom abetlen-Index ist korrupt
-            # (BadZipFile beim Entpacken der libggml-Dylib). Stattdessen aus dem
-            # sdist mit Metal kompilieren — macOS hat die Build-Tools, und Metal
-            # ist auf Apple Silicon ohnehin der GPU-Weg.
+            # (BadZipFile). Stattdessen aus dem sdist mit Metal kompilieren.
             CMAKE_ARGS="-DGGML_METAL=on" pip install --no-binary llama-cpp-python llama-cpp-python
             pip install -e ".[ingest,generate,gui,native,onnx]"
+          elif [ "${{ runner.os }}" = "Linux" ]; then
+            # torch als CPU-Build ZUERST installieren: das PyPI-Linux-Wheel ist
+            # der CUDA-Build (~2 GB, zieht nvidia-*-Pakete). Vorab vom CPU-Index,
+            # damit docling/sentence-transformers ihn nicht durch CUDA ersetzen.
+            pip install torch --index-url https://download.pytorch.org/whl/cpu
+            # PyGObject fürs native Fenster (bindet an die System-libgirepository;
+            # < 3.52, damit es bei girepository-1.0 / WebKit2-4.1 bleibt).
+            pip install "PyGObject<3.52"
+            pip install -e ".[ingest,generate,gui,native,onnx]" \
+              --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
           else
-            # llama-cpp-python als vorkompiliertes CPU-Wheel (spart den Compiler).
+            # Windows: PyPI-torch ist bereits CPU-only.
             pip install -e ".[ingest,generate,gui,native,onnx]" \
               --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
           fi
           pip install pyinstaller
 
+      # --- Bundle -----------------------------------------------------------
       - name: Bundle bauen
         run: pyinstaller packaging/pyinstaller/local-rag.spec --noconfirm --clean
 
-      - name: Bundle archivieren
-        shell: bash
+      # --- macOS: App signieren (optional, vor dem .dmg) --------------------
+      - name: Signieren – macOS App (optional)
+        if: runner.os == 'macOS'
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
         run: |
-          cd dist
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a "../${{ matrix.artifact }}.zip" local-rag
-          else
-            tar czf "../${{ matrix.artifact }}.tar.gz" local-rag
+          if [ -z "${MACOS_CERT_P12_BASE64:-}" ]; then
+            echo "::notice::Kein MACOS_CERT_P12_BASE64 — App bleibt unsigniert (Gatekeeper: Rechtsklick > Öffnen)."
+            exit 0
           fi
+          echo "$MACOS_CERT_P12_BASE64" | base64 --decode > cert.p12
+          security create-keychain -p ci build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p ci build.keychain
+          security import cert.p12 -k build.keychain -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci build.keychain
+          codesign --deep --force --options runtime \
+            --sign "$MACOS_SIGN_IDENTITY" dist/local-rag.app
+          rm -f cert.p12
+          echo "App signiert mit: $MACOS_SIGN_IDENTITY"
+
+      # --- Installer je OS --------------------------------------------------
+      - name: Installer .deb (Linux)
+        if: runner.os == 'Linux'
+        run: bash packaging/deb/build-deb.sh "$APP_VERSION" dist/local-rag .
+
+      - name: Installer NSIS (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          makensis -DVERSION="$APP_VERSION" -DSRC=dist/local-rag \
+            -DOUTFILE="local-rag-setup-$APP_VERSION.exe" \
+            packaging/nsis/local-rag.nsi
+
+      - name: Installer .dmg (macOS)
+        if: runner.os == 'macOS'
+        run: bash packaging/macos/build-dmg.sh "$APP_VERSION" dist/local-rag.app .
+
+      # --- Windows: Setup signieren (optional, nach NSIS) -------------------
+      - name: Signieren – Windows Setup (optional)
+        if: runner.os == 'Windows'
+        env:
+          WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          if [ -z "${WINDOWS_CERT_BASE64:-}" ]; then
+            echo "::notice::Kein WINDOWS_CERT_BASE64 — Installer bleibt unsigniert (SmartScreen-Warnung)."
+            exit 0
+          fi
+          echo "$WINDOWS_CERT_BASE64" | base64 --decode > cert.pfx
+          SIGNTOOL=$(find "/c/Program Files (x86)/Windows Kits/10/bin" -name signtool.exe 2>/dev/null | grep -i x64 | sort | tail -1)
+          "$SIGNTOOL" sign -f cert.pfx -p "$WINDOWS_CERT_PASSWORD" -fd sha256 \
+            -tr http://timestamp.digicert.com -td sha256 \
+            "local-rag-setup-$APP_VERSION.exe"
+          rm -f cert.pfx
+          echo "Installer signiert."
+
+      # --- macOS: .dmg notarisieren (optional, nach dem Bau) ----------------
+      - name: Notarisieren – macOS .dmg (optional)
+        if: runner.os == 'macOS'
+        env:
+          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+          MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+        run: |
+          if [ -z "${MACOS_NOTARY_APPLE_ID:-}" ]; then
+            echo "::notice::Keine Notary-Credentials — .dmg bleibt un-notarisiert."
+            exit 0
+          fi
+          xcrun notarytool submit "local-rag-$APP_VERSION.dmg" \
+            --apple-id "$MACOS_NOTARY_APPLE_ID" \
+            --password "$MACOS_NOTARY_PASSWORD" \
+            --team-id "$MACOS_NOTARY_TEAM_ID" --wait
+          xcrun stapler staple "local-rag-$APP_VERSION.dmg"
+          echo ".dmg notarisiert und gestapelt."
+
+      # --- Artefakte: Bundle-Archiv + Installer -----------------------------
+      - name: Artefakte einsammeln
+        run: |
+          mkdir -p out
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            (cd dist && 7z a "../out/${{ matrix.artifact }}.zip" local-rag >/dev/null)
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            (cd dist && tar czf "../out/${{ matrix.artifact }}.tar.gz" local-rag.app)
+          else
+            (cd dist && tar czf "../out/${{ matrix.artifact }}.tar.gz" local-rag)
+          fi
+          mv local-rag_*_*.deb out/ 2>/dev/null || true
+          mv local-rag-setup-*.exe out/ 2>/dev/null || true
+          mv local-rag-*.dmg out/ 2>/dev/null || true
+          ls -la out
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: |
-            ${{ matrix.artifact }}.zip
-            ${{ matrix.artifact }}.tar.gz
-          if-no-files-found: ignore
+          path: out/*
+          if-no-files-found: warn
           retention-days: 14
