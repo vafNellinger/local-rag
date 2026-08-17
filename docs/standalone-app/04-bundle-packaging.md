@@ -49,20 +49,28 @@ erhalten, den wir bewusst unterstützen).
    DirectML/CoreML/CUDA-Providern und Vulkan-/Metal-llama.cpp ins Bundle
    aufnehmen; Provider-/Backend-Wahl zur Laufzeit (herstellerübergreifend,
    daher ein Bundle pro OS statt Hardware-Matrix).
-6. **CI-Pipeline (zwingend).** Baut je OS Bundle + Installer, führt einen
-   Rauch-Test aus (App startet headless, `rag status`), legt die Installer als
-   Release-Artefakte ab. Vulkan-Wheels ggf. hier bauen (Strang 2).
-   - **An das bestehende Muster anpassen:** Das Team hostet auf
-     `git.parracidal.de` (Forgejo/Gitea). Der konkrete Zuschnitt (Forgejo/Gitea
-     Actions, Woodpecker/Drone o. ä.) wird an die Pipelines von `frostline-app`
-     / `frostline-base` angelehnt — sobald Zugriff besteht (siehe offener Punkt
-     Zertifikat unten).
-   - **Offener Kernpunkt — Windows-/macOS-Build-Runner:** Native Bundles lassen
-     sich nur auf dem jeweiligen OS bauen. Eine self-hosted Forgejo-Instanz hat
-     üblicherweise nur Linux-Runner. Zu klären: eigene Windows-/macOS-Runner
-     bereitstellen (VM/Mac-mini) **oder** die Bundle-Builds auf GitHub Actions
-     auslagern (öffentliche Win/Mac-Runner) und nur die Artefakte zurück nach
-     `git.parracidal.de` spiegeln.
+6. **CI-Pipeline (zwingend) — Forgejo Actions.** Das Team nutzt auf
+   `git.parracidal.de` **Forgejo Actions** (`.forgejo/workflows/*.yml`,
+   GitHub-Actions-kompatible Syntax) mit **wiederverwendbaren Workflows** aus dem
+   zentralen Repo `niklas.nellinger/infrastructure` und Ablage in der
+   Forgejo-**Container-Registry** (Login per `REGISTRY_TOKEN`-Secret). Belegt in
+   `frostline-app`/`frostline-base`: Image bauen → pushen → „Bump"-Job
+   aktualisiert den Tag in `infrastructure/stacks/.../docker-compose.yml` →
+   Deploy über docker-compose/Traefik (GitOps).
+   - **Passt nur teilweise auf local-rag:** Hier ist das Ziel **kein**
+     Container-Deploy, sondern **native Desktop-Installer**. Statt eines
+     Docker-Images entstehen `.exe`/`.dmg`/`.deb`, die als **Forgejo-Release**
+     abgelegt werden. Übernehmbar sind die Forgejo-Actions-Mechanik (Workflows,
+     Secrets, Registry für Zwischen-Artefakte) — nicht das GitOps-Deploy-Ziel.
+   - **Kernproblem — Build-Runner:** Der vorhandene Runner ist ein **`arm64-pi`**
+     (ARM64-Linux, Raspberry Pi). Der kann **keine** Windows-, macOS- oder
+     x86-Linux-Bundles bauen. Für die drei Ziel-Plattformen braucht es entweder
+     zusätzliche self-hosted Forgejo-Runner (Windows-VM, Mac-mini, x86-Linux)
+     **oder** die Bundle-Builds werden auf GitHub Actions ausgelagert
+     (öffentliche Win/Mac/Linux-Runner) und nur die fertigen Installer als
+     Artefakte zurück nach `git.parracidal.de` (Forgejo-Release) gespiegelt.
+   - Rauch-Test je Bundle (App startet headless, `rag status`); Vulkan-Wheels
+     ggf. hier bauen (Strang 2).
 
 ## Auto-Update
 

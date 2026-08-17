@@ -70,7 +70,10 @@ Frischinstallation), bevor der nächste beginnt.
   selbst wenn Embedding/Rerank auf ONNX laufen. Rechne mit ~1,5–2 GB je OS,
   Modelle nicht eingerechnet (die kommen beim ersten Start).
 - **TLS-Zertifikat von `git.parracidal.de` ist abgelaufen** (Stand 2026-08-17) —
-  blockiert Remote-Push und CI-Zugriff, bis es erneuert ist.
+  betrifft nur HTTPS. Git läuft über **SSH (Port 2222)** und ist unberührt;
+  HTTPS-basierte CI-Schritte (z. B. der GitOps-Bump per
+  `https://…@git.parracidal.de/…` wie in frostline) scheitern aber, bis das Zert
+  erneuert ist.
 
 ## Erfolgskriterium
 
