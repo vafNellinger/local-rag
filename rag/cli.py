@@ -827,7 +827,9 @@ def ask(
         console.print(f"[bold]{question}[/]")
         console.print()
 
-        sources, stream = pipeline.ask_stream(question)
+        # Der dritte Rückgabewert (wiederverwendet) betrifft nur den Mehrturn-
+        # Chat; die Einzelfrage auf der Kommandozeile hat keine History.
+        sources, stream, _ = pipeline.ask_stream(question)
         # Streaming, weil die Generierung auf CPU gemessen bei 2 bis 8 Token
         # pro Sekunde liegt — ohne laufende Ausgabe sieht das wie ein Hänger aus.
         started = time.time()
