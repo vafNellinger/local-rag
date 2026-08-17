@@ -6,6 +6,9 @@ requires-python = ">=3.11"
 dependencies = [
     "typer>=0.9",
     "rich>=13.0",
+    # Plattformkorrekte Speicherorte (Windows %LOCALAPPDATA%, macOS ~/Library,
+    # Linux XDG). Siehe rag/paths.py.
+    "platformdirs>=4.0",
 ]
 
 [project.optional-dependencies]

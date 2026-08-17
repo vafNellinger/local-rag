@@ -58,23 +58,21 @@ from rag.resolve import (
     resolve_vector_backend,
 )
 from rag.store import (
-    DEFAULT_INDEX_NAME,
     IndexStore,
     SearchHit,
     StoreError,
     read_index_documents,
     read_index_meta,
 )
+from rag.paths import DEFAULT_INDEX_PATH, SETTINGS_PATH
 from rag.vectors import DEFAULT_BACKEND, VectorBackendError, clear_vectors
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_INDEX_PATH = Path.home() / ".cache" / "local-rag" / DEFAULT_INDEX_NAME
-
-# Einstellungen liegen neben dem Index. Anders als der Index sind sie nicht
-# neu erzeugbar — sie sind die einzige Datei hier, die echte Nutzereingabe
-# enthält.
-SETTINGS_PATH = Path.home() / ".config" / "local-rag" / "settings.json"
+# DEFAULT_INDEX_PATH (data) und SETTINGS_PATH (config) kommen zentral aus
+# rag.paths und werden hier re-exportiert, weil cli und ui SETTINGS_PATH von
+# hier beziehen. Die Einstellungen sind die einzige Datei mit echter
+# Nutzereingabe und nicht neu erzeugbar.
 
 # Wie viele GPU-Layer llama.cpp auslagert, wenn der Plan "gpu" sagt. -1 heißt
 # "alle". Auf CPU bleibt es bei 0.

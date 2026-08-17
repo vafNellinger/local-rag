@@ -24,8 +24,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from rag.detect import CACHE_DIR, load_config
+from rag.detect import load_config
 from rag.hfload import load_offline_first
+from rag.paths import CACHE_DIR
 
 logger = logging.getLogger(__name__)
 

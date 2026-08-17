@@ -38,6 +38,7 @@ from rag.extract import (
 )
 from rag.generate import NO_CONTEXT_ANSWER, GenerationError, gguf_path
 from rag.ingest import IngestReport, ingest_paths, search_index
+from rag.paths import DEFAULT_INDEX_PATH
 from rag.pipeline import SETTINGS_PATH, PipelineError, RagPipeline, Settings
 from rag.rerank import RerankError
 from rag.resolve import (
@@ -48,7 +49,6 @@ from rag.resolve import (
     resolve_vector_backend,
 )
 from rag.store import (
-    DEFAULT_INDEX_NAME,
     IndexStore,
     StoreError,
     read_index_documents,
@@ -65,9 +65,8 @@ logger = logging.getLogger(__name__)
 
 _GIB = 1024**3
 
-# Wo der Index liegt, wenn nichts anderes gesagt wird. Neben dem Cache, weil
-# er wie der Cache aus den Quelldokumenten neu erzeugbar ist.
-DEFAULT_INDEX_PATH = Path.home() / ".cache" / "local-rag" / DEFAULT_INDEX_NAME
+# Wo der Index liegt, wenn nichts anderes gesagt wird — im data-Ordner
+# (plattformkorrekt, siehe rag.paths).
 
 
 @app.callback()

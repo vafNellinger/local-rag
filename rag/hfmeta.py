@@ -17,11 +17,10 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from pathlib import Path
+
+from rag.paths import HF_LANGUAGE_CACHE as CACHE_FILE
 
 logger = logging.getLogger(__name__)
-
-CACHE_FILE = Path.home() / ".cache" / "local-rag" / "hf-language.json"
 
 # Sprachtags eines Modells ändern sich praktisch nie — nur bei einem
 # Card-Update. Eine Woche ist reichlich konservativ.

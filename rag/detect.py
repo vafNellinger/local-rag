@@ -20,10 +20,11 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from rag.paths import CACHE_DIR
+
 logger = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "platforms.toml"
-CACHE_DIR = Path.home() / ".cache" / "local-rag"
 
 # whichllm braucht pro Lauf bis zu ~3 Minuten (HF-Abfragen, Benchmark-Merge).
 # Für eine Hardware- und Ranking-Abfrage, die sich täglich kaum ändert, ist ein

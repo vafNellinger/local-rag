@@ -27,6 +27,8 @@ import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from rag.paths import EXTRACT_CACHE_DIR
+
 logger = logging.getLogger(__name__)
 
 # Sprachen für die Texterkennung. Deutsch zuerst, Englisch dazu, weil
@@ -78,8 +80,7 @@ SUPPORTED_SUFFIXES = {".pdf", ".docx", ".md", ".markdown", ".txt", ".text"}
 # fremdem Modell lässt sich nicht öffnen.
 #
 # Gemessen am Testkorpus macht die Extraktion ein Drittel des Ingests aus, bei
-# 10 % gescannten Seiten über die Hälfte.
-EXTRACT_CACHE_DIR = Path.home() / ".cache" / "local-rag" / "extract"
+# 10 % gescannten Seiten über die Hälfte. Der Ort kommt aus rag.paths (cache).
 
 # Hochzählen, wenn sich das Format der Cache-Einträge ändert. Alte Einträge
 # werden dann ignoriert statt falsch gelesen.

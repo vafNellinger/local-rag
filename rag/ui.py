@@ -43,6 +43,7 @@ from rag.pipeline import (
 from rag.rerank import RerankError
 from rag.resolve import ResolutionError, backend_options
 from rag.detect import WhichllmError, load_config
+from rag.paths import LOG_PATH, UPLOAD_DIR
 from rag.store import StoreError, read_index_documents
 from rag.vectors import BACKENDS
 
@@ -50,13 +51,8 @@ logger = logging.getLogger(__name__)
 
 # Wohin hochgeladene Dateien wandern. Der Index verweist auf Pfade, also
 # müssen sie einen dauerhaften Ort haben — ein Temp-Verzeichnis wäre nach dem
-# nächsten Neustart weg und der Index zeigte ins Leere.
-UPLOAD_DIR = Path.home() / ".local" / "share" / "local-rag" / "dokumente"
-
-# Wohin das Protokoll geschrieben wird. Eine Oberfläche braucht das dringender
-# als ein CLI-Befehl: dort steht der Traceback im Terminal, hier verschwindet
-# er, sobald die Meldung im Browser weggeklickt ist.
-LOG_PATH = Path.home() / ".cache" / "local-rag" / "gui.log"
+# nächsten Neustart weg und der Index zeigte ins Leere. UPLOAD_DIR (data) und
+# LOG_PATH (cache) kommen plattformkorrekt aus rag.paths.
 
 # Ab welcher Größe das Protokoll umgewälzt wird, und wie viele Generationen
 # behalten werden. Klein gehalten: interessant ist der letzte Fehler, nicht
