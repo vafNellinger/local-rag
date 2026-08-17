@@ -48,10 +48,18 @@ jobs:
       - name: Python-Abhängigkeiten
         run: |
           python -m pip install --upgrade pip
-          # llama-cpp-python als vorkompiliertes CPU-Wheel (spart den Compiler
-          # im CI). GPU-Backends (Vulkan/Metal) sind ein späterer Schritt.
-          pip install -e ".[ingest,generate,gui,native,onnx]" \
-            --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            # Das vorkompilierte macos-arm64-Wheel vom abetlen-Index ist korrupt
+            # (BadZipFile beim Entpacken der libggml-Dylib). Stattdessen aus dem
+            # sdist mit Metal kompilieren — macOS hat die Build-Tools, und Metal
+            # ist auf Apple Silicon ohnehin der GPU-Weg.
+            CMAKE_ARGS="-DGGML_METAL=on" pip install --no-binary llama-cpp-python llama-cpp-python
+            pip install -e ".[ingest,generate,gui,native,onnx]"
+          else
+            # llama-cpp-python als vorkompiliertes CPU-Wheel (spart den Compiler).
+            pip install -e ".[ingest,generate,gui,native,onnx]" \
+              --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+          fi
           pip install pyinstaller
 
       - name: Bundle bauen
