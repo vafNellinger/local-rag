@@ -118,6 +118,14 @@ hier bereits mit Vulkan gebaut (`gpu_offload: True`, `matrix cores: KHR_coopmat`
 Damit ist der eigentliche Query-Hebel (Generierung auf GPU) auf verbreiteter
 AMD-APU-Hardware bestätigt — der Vulkan-Weg des Fahrplans trägt.
 
+**Nebenfund beim end-to-end-Test:** Ein echter `rag ask` gegen den Index
+(„Welche Kündigungsfrist gilt beim Gewerbemietvertrag?") lieferte die korrekte
+Antwort mit Quelle (mietvertrag-gewerbe.md, Rerank-Score 0,882), Generierung
+5,9 s auf der GPU — **nachdem** ein Absturz gefixt war: `rag ask` war seit dem
+Conversational-Routing-Umbau kaputt (`ask_stream` liefert 3 Werte, der CLI
+entpackte 2), unbemerkt, weil der Command-Pfad keinen Test hatte. Gefixt
+(`4d82ab0`) + Regressionstest (`tests/test_cli_ask.py`).
+
 ---
 
 # Strang 5 — App-Reife: Cross-Platform-Datenpfade
