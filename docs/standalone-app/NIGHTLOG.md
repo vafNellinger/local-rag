@@ -112,6 +112,36 @@ Auf Linux ändert sich nur der Index-Ort (cache → data); cache/config/dokument
 bleiben gleich. Auf Windows/macOS liegen jetzt alle Daten am konventionell
 richtigen Ort — die Voraussetzung fürs Bundle (Strang 4).
 
+---
+
+# Strang 3 (native GUI) — bereits erledigt
+
+Beim Prüfen festgestellt: Stufe 1 ist schon umgesetzt. Alle Launcher rufen
+`rag gui --native` auf (`start.sh`, `start.bat`, `packaging/*`), und `ui.py`
+(`_webview_verfuegbar()`) fällt sauber auf den Browser zurück, wenn keine Webview
+da ist. Kein Handlungsbedarf; Stufe 2 (echtes Qt-Toolkit) bleibt ein eigenes,
+größeres Vorhaben.
+
+---
+
+# Vertiefung Strang 1 — INT8-Quantisierung (gemessen, nicht eingebaut)
+
+Die offene Frage aus Strang 1 (kann ONNX auf CPU konkurrenzfähig werden?)
+beantwortet: mit dynamischer INT8-Quantisierung ja — als bewusste Abwägung.
+Werkzeug neu: `tools/quantize_onnx.py`.
+
+| | Torch (fp32) | ONNX fp32 | ONNX INT8 |
+|---|---|---|---|
+| Tempo (CPU) | 74 ms/Chunk | 156 ms/Chunk | **64 ms/Chunk** |
+| Modellgröße | — | 2,2 GB | **568 MB** |
+| Treue zu ST (Cosine) | 1,0 | 1,0 | 0,978 |
+| Recall@5 (Goldstandard) | 98,3 % | 98,3 % | 96,7 % |
+
+INT8 ist die schnellste CPU-Option und 4× kleiner (relevant fürs Bundle), kostet
+aber ~1,6 Punkte Recall. Deshalb **nicht als Standard eingebaut** — die Abwägung
+gehört dir, idealerweise nach `rag eval` mit den eigenen Dokumenten und einem
+INT8-gebauten Index.
+
 ## Offen für den Morgen
 
 - **Strang 2 (GPU-LLM)** und die **GPU-Messung von Strang 1** brauchen echte
