@@ -83,7 +83,39 @@ ONNX ist ein sauberes opt-in (`engine = "onnx"` je Profil in `platforms.toml`).
 - `tests/test_engines.py` — 9 Tests (neu)
 - `pyproject.toml` — `[onnx]` (Laufzeit: nur onnxruntime) + `[export-onnx]` (optimum)
 
-## Weiter mit Strang 2
+## Strang 2 übersprungen (nicht autonom verifizierbar)
 
-Nach Strang 1 geht es planmäßig mit dem GPU-LLM (Vulkan/Metal) weiter — der
-Fortschritt wird hier unten angehängt.
+GPU-LLM (Vulkan/Metal) braucht GPU-Hardware und ein Vulkan-SDK — beides in dieser
+Umgebung nicht vorhanden, und `n_gpu_layers` ist im Code ohnehin schon
+vorbereitet. Deshalb stattdessen der nächste voll lokal umsetzbare Strang.
+
+---
+
+# Strang 5 — App-Reife: Cross-Platform-Datenpfade
+
+Erledigt und verifiziert:
+
+- **`rag/paths.py`** (neu): zentrale Speicherorte über `platformdirs` —
+  data/cache/config je Plattform korrekt (Windows `%LOCALAPPDATA%`, macOS
+  `~/Library`, Linux XDG). Index + Dokumente → **data**, Einstellungen →
+  **config**, Extraktions-Cache/ONNX/Erkennungs-Caches/GUI-Log → **cache**.
+- **Alle hartcodierten `~/.cache`/`~/.config`/`~/.local/share`-Pfade** in
+  `detect.py`, `pipeline.py`, `cli.py`, `ui.py`, `extract.py`, `hfmeta.py`,
+  `embed.py` auf `rag.paths` umgestellt; dabei ungenutzte Importe bereinigt.
+- **Migration**: ein Alt-Index unter `~/.cache/local-rag/index.db` (der frühere
+  Sammelort) wandert einmalig samt WAL/SHM in den data-Ordner, ohne etwas zu
+  überschreiben. `platformdirs` als Kern-Dependency ergänzt.
+- **Tests**: `tests/test_paths.py` (7 Tests: Pfad-Rollen; Migration idempotent
+  und ohne Altbestand). Volle Suite **grün: 435 passed, 1 skipped**.
+
+Auf Linux ändert sich nur der Index-Ort (cache → data); cache/config/dokumente
+bleiben gleich. Auf Windows/macOS liegen jetzt alle Daten am konventionell
+richtigen Ort — die Voraussetzung fürs Bundle (Strang 4).
+
+## Offen für den Morgen
+
+- **Strang 2 (GPU-LLM)** und die **GPU-Messung von Strang 1** brauchen echte
+  GPU-Hardware (dein erster Schritt).
+- **Strang 3 (native GUI)**: pywebview-Default lokal machbar, GUI-Start aber
+  schwer ohne Display zu verifizieren.
+- **Strang 4 (Bundle)**: braucht Cross-Platform-Runner + Signing-Accounts.
