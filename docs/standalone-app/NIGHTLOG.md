@@ -126,6 +126,10 @@ Conversational-Routing-Umbau kaputt (`ask_stream` liefert 3 Werte, der CLI
 entpackte 2), unbemerkt, weil der Command-Pfad keinen Test hatte. Gefixt
 (`4d82ab0`) + Regressionstest (`tests/test_cli_ask.py`).
 
+Anschließend die übrigen CLI-Commands gegengeprüft (`search`, `plan`, `inspect`,
+`convert`, `status`, `eval`, `ingest`, `reindex` sowie `--help` für alle) —
+funktionieren; `ask` war der einzige defekte.
+
 ---
 
 # Strang 5 — App-Reife: Cross-Platform-Datenpfade
