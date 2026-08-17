@@ -9,7 +9,14 @@
 # fummeligen Pakete automatisch ein. Was der erste CI-Lauf noch vermisst, wird
 # hier ergänzt.
 
+import os
+
 from PyInstaller.utils.hooks import collect_all, collect_submodules
+
+# PyInstaller löst Pfade relativ zum Spec-Verzeichnis auf, nicht zum CWD —
+# deshalb alles absolut über SPECPATH, damit der Aufruf von überall klappt.
+_HERE = os.path.abspath(SPECPATH)  # packaging/pyinstaller
+_ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))  # Repo-Wurzel
 
 datas: list = []
 binaries: list = []
@@ -43,14 +50,13 @@ for pkg in (
 hiddenimports += collect_submodules("transformers")
 
 # Projekt-Konfiguration muss ins Bundle (Modelle/Geräte pro Plattformklasse).
-datas += [("config/platforms.toml", "config")]
+datas += [(os.path.join(_ROOT, "config", "platforms.toml"), "config")]
 
 block_cipher = None
 
-# Läuft aus dem Repo-Root: `pyinstaller packaging/pyinstaller/local-rag.spec`.
 a = Analysis(
-    ["packaging/pyinstaller/app.py"],
-    pathex=["."],
+    [os.path.join(_HERE, "app.py")],
+    pathex=[_ROOT],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
