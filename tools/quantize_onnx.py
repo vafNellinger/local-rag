@@ -1,8 +1,11 @@
-"""bge-m3 ONNX dynamisch nach INT8 quantisieren.
+"""Ein exportiertes ONNX-Modell dynamisch nach INT8 quantisieren.
 
-Optionaler Bauschritt nach ``tools/export_onnx.py``. INT8 ist die schnellste
-CPU-Variante und deutlich kleiner — aber verlustbehaftet. Gemessen am Testkorpus
-(dynamisch, avx512_vnni):
+Funktioniert für beide Modelle aus ``tools/export_onnx.py`` — den Embedder
+(bge-m3) und den Reranker (bge-reranker-v2-m3). Optionaler Bauschritt: INT8 ist
+die schnellste CPU-Variante und deutlich kleiner — aber verlustbehaftet. Am
+Reranker lohnt es besonders (er treibt die Query-Latenz): dort ~2,9× schneller
+bei erhaltenem Ranking. Am Embedder gemessen am Testkorpus (dynamisch,
+avx512_vnni):
 
 - Tempo: ~64 ms/Chunk auf CPU (fp32-ONNX ~156, Torch ~74) — INT8 ist auf CPU die
   schnellste Option.

@@ -156,6 +156,13 @@ aber ~1,6 Punkte Recall. Deshalb **nicht als Standard eingebaut** — die Abwäg
 gehört dir, idealerweise nach `rag eval` mit den eigenen Dokumenten und einem
 INT8-gebauten Index.
 
+**Reranker (bge-reranker-v2-m3)** — hier lohnt INT8 am meisten, weil der Reranker
+die Query-Latenz treibt (läuft bei jeder Frage): **2,88× schneller** (13,2 statt
+37,9 ms/Paar), 4× kleiner (560 MB), und das **Ranking bleibt gleich** (absolute
+Scores weichen bis ~0,08 ab — bei gesetzter `min_rerank_score`-Schwelle also
+nachjustieren). Für ein CPU-Bundle der attraktivste INT8-Kandidat. Dasselbe
+Werkzeug: `python tools/quantize_onnx.py <reranker-verzeichnis>`.
+
 ## Offen für den Morgen
 
 - **Strang 2 (GPU-LLM)** und die **GPU-Messung von Strang 1** brauchen echte
