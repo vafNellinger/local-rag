@@ -11,8 +11,9 @@ erster Schritt am Morgen.
 | **1 — GPU-Embedding via ONNX** | ✅ vollständig: austauschbare ONNX-Engine für Embedding + Reranking, bit-identisch zu sentence-transformers, getestet |
 | **5 — App-Reife (Datenpfade)** | ✅ vollständig: plattformkorrekte Pfade via platformdirs + Migration |
 | **3 — native GUI** | ✅ war bereits erledigt (Launcher nutzen `--native`, Browser-Fallback) |
+| **2 — GPU-LLM (Vulkan)** | ✅ auf der AMD-iGPU gemessen: **1,99× schneller**, Integration funktioniert schon |
 | INT8-Vertiefung | 📊 gemessen: schneller + 4× kleiner, aber −1,6 % Recall — als opt-in-Werkzeug |
-| **2 — GPU-LLM**, **4 — Bundle** | ⏸️ brauchen echte GPU-/Cross-Platform-Hardware + Signing-Accounts |
+| **4 — Bundle** | ⏸️ braucht Cross-Platform-Runner + Signing-Accounts |
 
 6 Commits (`c96625c`-Bereich … `e770912`). Volle Testsuite grün (434 passed).
 Details je Strang unten.
@@ -97,11 +98,25 @@ ONNX ist ein sauberes opt-in (`engine = "onnx"` je Profil in `platforms.toml`).
 - `tests/test_engines.py` — 9 Tests (neu)
 - `pyproject.toml` — `[onnx]` (Laufzeit: nur onnxruntime) + `[export-onnx]` (optimum)
 
-## Strang 2 übersprungen (nicht autonom verifizierbar)
+## Strang 2 — GPU-LLM via Vulkan ✅ (die Maschine hat doch eine GPU)
 
-GPU-LLM (Vulkan/Metal) braucht GPU-Hardware und ein Vulkan-SDK — beides in dieser
-Umgebung nicht vorhanden, und `n_gpu_layers` ist im Code ohnehin schon
-vorbereitet. Deshalb stattdessen der nächste voll lokal umsetzbare Strang.
+Zunächst als „keine GPU" eingeschätzt — dann stellte sich heraus: die Maschine
+hat eine **AMD Radeon 880M/890M iGPU (RDNA 3.5, GFX1150)**, nutzbar über
+**Vulkan** (RADV-Treiber, API 1.4) — ohne CUDA/ROCm. Und llama-cpp-python ist
+hier bereits mit Vulkan gebaut (`gpu_offload: True`, `matrix cores: KHR_coopmat`).
+
+- **Gemessen** (Qwen3-4B-Instruct Q5_K_M, 120 Token): GPU **24,0 tok/s** vs. CPU
+  **12,1 tok/s** = **1,99× schneller**. Für eine iGPU mit geteiltem RAM solide;
+  eine dedizierte GPU (NVIDIA/CUDA) liefert deutlich mehr.
+- **Integration läuft schon**: `detect_local()` erkennt die GPU korrekt
+  (Plattformklasse `igpu_shared`, ~8 GB Shared-VRAM), und `platforms.toml` setzt
+  dort `generator_device = "gpu"`. Die App nutzt die Vulkan-GPU also automatisch
+  für die Antwortgenerierung. Embedder/Reranker bleiben CPU — onnxruntime/torch
+  haben auf AMD-Linux ohne ROCm keinen GPU-Provider; genau dafür ist die Klasse
+  so geschnitten.
+
+Damit ist der eigentliche Query-Hebel (Generierung auf GPU) auf verbreiteter
+AMD-APU-Hardware bestätigt — der Vulkan-Weg des Fahrplans trägt.
 
 ---
 
