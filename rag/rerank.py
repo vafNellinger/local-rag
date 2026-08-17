@@ -22,7 +22,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 from rag.detect import load_config
-from rag.embed import resolve_device
+from rag.embed import (
+    _onnx_model_dir,
+    _onnx_providers,
+    _onnx_session_options,
+    resolve_device,
+)
 from rag.hfload import load_offline_first
 from rag.store import SearchHit
 
@@ -52,6 +57,10 @@ class RerankerConfig:
     model_id: str
     max_seq_length: int = 8192
     vram_estimate_mb: int = 0
+    # "sentence-transformers" (CrossEncoder, Standard) oder "onnx" (ONNX
+    # Runtime). "onnx" fällt sauber auf den CrossEncoder zurück, wenn das
+    # exportierte Modell fehlt.
+    engine: str = "sentence-transformers"
 
 
 def load_reranker_config(profile: str = "default") -> RerankerConfig:
@@ -70,7 +79,103 @@ def load_reranker_config(profile: str = "default") -> RerankerConfig:
         model_id=str(entry["model_id"]),
         max_seq_length=int(entry.get("max_seq_length", 8192)),
         vram_estimate_mb=int(entry.get("vram_estimate_mb", 0)),
+        engine=str(entry.get("engine", "sentence-transformers")),
     )
+
+
+class _CrossEncoderEngine:
+    """Der PyTorch-Weg über sentence-transformers CrossEncoder — die Vorgabe."""
+
+    def __init__(self, config: RerankerConfig, device: str) -> None:
+        try:
+            from sentence_transformers import CrossEncoder
+        except ImportError as exc:  # pragma: no cover
+            raise RerankError(
+                "sentence-transformers fehlt: uv pip install -e '.[ingest]'"
+            ) from exc
+        # Offline zuerst, wie beim Embedder (siehe rag/hfload.py).
+        self._model = load_offline_first(
+            lambda offline: CrossEncoder(
+                config.model_id,
+                device=device,
+                max_length=config.max_seq_length,
+                local_files_only=offline,
+            ),
+            was=f"Reranker {config.model_id}",
+        )
+
+    def predict(self, pairs: Sequence[tuple[str, str]], batch_size: int) -> list[float]:
+        return [float(s) for s in self._model.predict(list(pairs), batch_size=batch_size)]
+
+
+class _OnnxRerankerEngine:
+    """ONNX Runtime für den Cross-Encoder: derselbe Score, GPU-portabel.
+
+    bge-reranker-v2-m3 ist ein Sequence-Classification-Modell mit einem Logit
+    pro (Frage, Passage)-Paar; ``CrossEncoder.predict`` schickt diesen Logit bei
+    ``num_labels=1`` durch eine Sigmoid-Funktion. Diese Engine bildet das nach.
+    """
+
+    def __init__(self, config: RerankerConfig, device: str, onnx_dir) -> None:
+        import onnxruntime as ort
+        from transformers import AutoTokenizer
+
+        self._session = ort.InferenceSession(
+            str(onnx_dir / "model.onnx"),
+            sess_options=_onnx_session_options(),
+            providers=_onnx_providers(device),
+        )
+        self._input_names = {i.name for i in self._session.get_inputs()}
+        self._tokenizer = AutoTokenizer.from_pretrained(str(onnx_dir))
+        self.max_seq_length = config.max_seq_length
+
+    def predict(self, pairs: Sequence[tuple[str, str]], batch_size: int) -> list[float]:
+        import numpy as np
+
+        pairs = list(pairs)
+        scores: list[float] = []
+        for start in range(0, len(pairs), batch_size):
+            stapel = pairs[start : start + batch_size]
+            kodiert = self._tokenizer(
+                [q for q, _ in stapel],
+                [p for _, p in stapel],
+                padding=True,
+                truncation=True,
+                max_length=self.max_seq_length,
+                return_tensors="np",
+            )
+            feeds = {k: v for k, v in kodiert.items() if k in self._input_names}
+            logits = self._session.run(None, feeds)[0].reshape(-1)
+            scores.extend((1.0 / (1.0 + np.exp(-logits))).tolist())  # Sigmoid
+        return scores
+
+
+def _load_reranker_engine(config: RerankerConfig, device: str):
+    """Reranker-Engine nach Konfiguration wählen, mit CrossEncoder-Fallback."""
+    if config.engine == "onnx":
+        onnx_dir = _onnx_model_dir(config.model_id)
+        if (onnx_dir / "model.onnx").exists():
+            try:
+                return _OnnxRerankerEngine(config, device, onnx_dir)
+            except Exception as exc:  # noqa: BLE001 — Grund wird geloggt
+                logger.warning(
+                    "ONNX-Reranker für %s nicht ladbar (%s) — CrossEncoder",
+                    config.model_id, exc,
+                )
+        else:
+            logger.warning(
+                "ONNX-Reranker fehlt unter %s — CrossEncoder. "
+                "Export: python tools/export_onnx.py",
+                onnx_dir,
+            )
+    try:
+        return _CrossEncoderEngine(config, device)
+    except RerankError:
+        raise
+    except Exception as exc:
+        raise RerankError(
+            f"Reranker '{config.model_id}' konnte nicht geladen werden: {exc}"
+        ) from exc
 
 
 class Reranker:
@@ -91,44 +196,23 @@ class Reranker:
         self.config = config or load_reranker_config(profile)
         self.device = resolve_device(device)
         self.batch_size = batch_size
-        self._model = None
+        self._engine = None
 
     @property
     def is_loaded(self) -> bool:
-        return self._model is not None
+        return self._engine is not None
 
     @property
-    def model(self):
-        if self._model is None:
-            self._model = self._load()
-        return self._model
-
-    def _load(self):
-        try:
-            from sentence_transformers import CrossEncoder
-        except ImportError as exc:  # pragma: no cover
-            raise RerankError(
-                "sentence-transformers fehlt: uv pip install -e '.[ingest]'"
-            ) from exc
-
-        logger.debug("Lade Reranker %s auf %s", self.config.model_id, self.device)
-        # Offline zuerst, wie beim Embedder (siehe rag/hfload.py): Cache ohne
-        # Netz und ohne HF-Roundtrip, nachgeladen wird nur, was fehlt.
-        try:
-            return load_offline_first(
-                lambda offline: CrossEncoder(
-                    self.config.model_id,
-                    device=self.device,
-                    max_length=self.config.max_seq_length,
-                    local_files_only=offline,
-                ),
-                was=f"Reranker {self.config.model_id}",
+    def engine(self):
+        if self._engine is None:
+            logger.debug(
+                "Lade Reranker %s (%s) auf %s",
+                self.config.model_id,
+                self.config.engine,
+                self.device,
             )
-        except Exception as exc:
-            raise RerankError(
-                f"Reranker '{self.config.model_id}' konnte nicht geladen "
-                f"werden: {exc}"
-            ) from exc
+            self._engine = _load_reranker_engine(self.config, self.device)
+        return self._engine
 
     def rerank(
         self,
@@ -152,7 +236,7 @@ class Reranker:
 
         pairs = [(query, _context_text(hit)) for hit in hits]
         try:
-            scores = self.model.predict(pairs, batch_size=self.batch_size)
+            scores = self.engine.predict(pairs, self.batch_size)
         except Exception as exc:
             raise RerankError(f"Reranking fehlgeschlagen: {exc}") from exc
 

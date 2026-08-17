@@ -43,6 +43,23 @@ gui = [
 native = [
     "pywebview>=5.0",
 ]
+# Laufzeit: herstellerübergreifende GPU-Inferenz für Embedding/Reranking über
+# ONNX Runtime statt PyTorch. Nur onnxruntime — die Modelle werden vorab nach
+# ONNX exportiert (tools/export_onnx.py). Für GPU wird je nach Plattform statt
+# 'onnxruntime' das passende Paket installiert: onnxruntime-gpu (CUDA),
+# onnxruntime-directml (Windows, herstellerübergreifend) bzw. auf macOS der
+# CoreML-Provider aus dem Standardpaket. Ohne dieses Extra bleibt
+# sentence-transformers der Weg.
+onnx = [
+    "onnxruntime>=1.20",
+]
+# Nur zum Exportieren der HF-Modelle nach ONNX — Entwicklungswerkzeug, nicht
+# Laufzeit. optimum pinnt transformers < 5; deshalb bewusst getrennt und
+# idealerweise in einer eigenen Umgebung ausgeführt, damit der Haupt-venv nicht
+# heruntergestuft wird.
+export-onnx = [
+    "optimum[onnxruntime]>=2.0",
+]
 # Alternative Vektor-Backends. Keines ist nötig — sqlite-vec steht in
 # [ingest] und ist die Vorgabe. Jedes hier ist einzeln installierbar, damit
 # niemand drei Vektordatenbanken mitschleppt, um eine zu benutzen.
