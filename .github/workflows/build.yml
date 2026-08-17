@@ -24,6 +24,11 @@ jobs:
           - os: macos-latest
             artifact: local-rag-macos-arm64
     runs-on: ${{ matrix.os }}
+    # bash auf allen dreien (auch Windows, via Git Bash) — sonst scheitert die
+    # \-Zeilenfortsetzung an PowerShell.
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - uses: actions/checkout@v4
