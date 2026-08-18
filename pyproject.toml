@@ -9,6 +9,13 @@ dependencies = [
     # Plattformkorrekte Speicherorte (Windows %LOCALAPPDATA%, macOS ~/Library,
     # Linux XDG). Siehe rag/paths.py.
     "platformdirs>=4.0",
+    # Hardware-Erkennung (GPU-VRAM, geteilter APU-Speicher, RAM) für die
+    # Plattformklassifizierung. Früher ein externes pipx-Tool; jetzt echte
+    # Abhängigkeit, damit die gebündelte App ohne Fremdinstallation läuft.
+    # rag/detect.py importiert die Hardware-API (whichllm.hardware.detector)
+    # direkt; der obere Versions-Pin schützt vor Bruch dieser internen
+    # Schnittstelle.
+    "whichllm>=0.5.15,<0.6",
 ]
 
 [project.optional-dependencies]

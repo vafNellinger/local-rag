@@ -38,6 +38,7 @@ for pkg in (
     "llama_cpp",
     "webview",  # pywebview
     "sqlite_vec",
+    "whichllm",  # Hardware-Erkennung, direkt importiert (siehe rag/detect.py)
 ):
     try:
         d, b, h = collect_all(pkg)

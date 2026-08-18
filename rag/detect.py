@@ -1,12 +1,16 @@
 """Hardware-Erkennung und Plattformklassifizierung.
 
-whichllm liefert mit ``--json`` sowohl die erkannte Hardware als auch das
-Modell-Ranking. Wir nutzen es als Hardware-Orakel, weil seine GPU-Erkennung
-(inkl. Bandbreite, geteiltem APU-Speicher und Headroom-Reservierung) deutlich
-gründlicher ist als was psutil hergibt.
+whichllm liefert die erkannte Hardware und das Modell-Ranking. Wir nutzen es
+als Hardware-Orakel, weil seine GPU-Erkennung (inkl. Bandbreite, geteiltem
+APU-Speicher und Headroom-Reservierung) deutlich gründlicher ist als was
+psutil hergibt. whichllm ist eine echte Abhängigkeit (nicht mehr extern per
+pipx): die lokale Hardware-Erkennung läuft über den Direktimport von
+``whichllm.hardware.detector`` — das funktioniert auch im gebündelten Programm
+ohne CLI im PATH und ohne Netzwerk (siehe ``_detect_hardware_via_import``).
 
-Für Zielplattformen, auf denen wir gerade nicht sitzen, gibt es die
-Simulation über ``--gpu`` / ``--vram`` / ``--cpu-only``.
+Der ``whichllm --json``-Subprozess bleibt Ausweichweg und der Weg für
+simulierte Zielplattformen (``--gpu`` / ``--vram`` / ``--cpu-only``), die nur
+das CLI beherrscht.
 """
 
 from __future__ import annotations
@@ -102,10 +106,11 @@ def run_whichllm(
 ) -> dict:
     """Rufe ``whichllm --json`` auf und gib das geparste Ergebnis zurück.
 
-    Subprozess statt ``import whichllm``: das Tool ist per pipx in ein eigenes
-    venv installiert und wir wollen uns nicht an interne APIs binden, die sich
-    zwischen 0.5.x-Versionen verschieben können. Die JSON-Ausgabe ist die
-    stabilste Schnittstelle, die es anbietet.
+    Der CLI-Subprozess ist der stabile Weg für das Modell-Ranking und für
+    simulierte Plattformen: die ``--json``-Ausgabe ändert sich zwischen
+    0.5.x-Versionen kaum. Die lokale Hardware-Erkennung dagegen läuft über den
+    Direktimport (siehe ``_detect_hardware_via_import``), damit sie auch im
+    Bundle ohne CLI und ohne Netzwerk funktioniert.
     """
     full_args = ["whichllm", "--json", *args]
     cache_file = _cache_path(full_args)
@@ -129,7 +134,8 @@ def run_whichllm(
         )
     except FileNotFoundError as exc:
         raise WhichllmError(
-            "whichllm nicht gefunden. Installation: pipx install whichllm"
+            "whichllm-CLI nicht im PATH gefunden (wird fürs Modell-Ranking "
+            "gebraucht; die Hardware-Erkennung läuft ohne CLI)."
         ) from exc
     except subprocess.TimeoutExpired as exc:
         raise WhichllmError(f"whichllm-Timeout nach {timeout}s") from exc
@@ -199,10 +205,67 @@ def _platform_from_hardware(
     )
 
 
+def _auto_vram_headroom(vram_bytes: int) -> int:
+    """VRAM-Reserve wie whichllm sie ansetzt (nachgebildet für den Direktpfad).
+
+    whichllms CLI zieht vom rohen VRAM einen Puffer ab und schreibt das
+    Ergebnis nach ``usable_vram_bytes``. Der direkte API-Aufruf
+    (``detect_hardware``) lässt das Feld dagegen leer — ohne diesen Abzug sähe
+    ``classify`` die GPU mit 0 nutzbarem VRAM. Formel identisch zu
+    ``whichllm.cli._auto_vram_headroom``.
+    """
+    if vram_bytes <= 0:
+        return 0
+    return int(max(512 * 1024**2, min(vram_bytes * 0.05, 2 * _GIB)))
+
+
+def _detect_hardware_via_import() -> dict | None:
+    """Hardware-Block direkt über die mitgelieferte whichllm-Python-API.
+
+    Im gebündelten Programm gibt es kein externes ``whichllm``-CLI im PATH; die
+    Erkennung läuft deshalb über den Direktimport von ``detect_hardware``. Das
+    umgeht zugleich die Modell-Abfrage des CLI (HF-Netzwerk), die für die reine
+    Hardware-Erkennung unnötig ist und offline scheitern würde. Gibt ``None``
+    zurück, wenn whichllm nicht importierbar ist oder die Erkennung fehlschlägt
+    — dann greift der CLI-Subprozess als Ausweichweg.
+    """
+    try:
+        from dataclasses import asdict
+
+        from whichllm.hardware.detector import detect_hardware
+    except Exception as exc:  # whichllm nicht importierbar
+        logger.debug("whichllm-Direktimport nicht verfügbar: %s", exc)
+        return None
+    try:
+        hardware = asdict(detect_hardware())
+    except Exception as exc:  # Erkennung selbst gescheitert
+        logger.warning("whichllm-Hardware-Erkennung fehlgeschlagen: %s", exc)
+        return None
+    # usable_vram_bytes setzt sonst erst der CLI (Headroom); hier nachziehen,
+    # damit classify() die GPU nicht mit 0 nutzbarem VRAM sieht.
+    for gpu in hardware.get("gpus", []):
+        if gpu.get("usable_vram_bytes") is None:
+            vram = int(gpu.get("vram_bytes") or 0)
+            gpu["usable_vram_bytes"] = max(0, vram - _auto_vram_headroom(vram))
+    return hardware
+
+
 def _probe(args: list[str], *, label: str, use_cache: bool) -> Platform:
-    """Hole nur den Hardware-Block. ``-n 1`` hält den Lauf so klein wie möglich."""
-    data = run_whichllm([*args, "-n", "1"], use_cache=use_cache)
-    hardware = data.get("hardware")
+    """Hole nur den Hardware-Block.
+
+    Bevorzugt den Direktimport der whichllm-API (funktioniert auch im Bundle
+    ohne externes CLI und ohne Netzwerk); fällt auf den ``whichllm --json``-
+    Subprozess zurück, wenn das Paket nicht importierbar ist. ``-n 1`` hält den
+    CLI-Lauf klein.
+    """
+    hardware = None
+    # Nur die echte lokale Hardware kommt aus dem Direktimport; Simulations-
+    # argumente (--gpu/--vram/--cpu-only) beherrscht ausschließlich das CLI.
+    if not args:
+        hardware = _detect_hardware_via_import()
+    if hardware is None:
+        data = run_whichllm([*args, "-n", "1"], use_cache=use_cache)
+        hardware = data.get("hardware")
     if not hardware:
         raise WhichllmError("whichllm-JSON enthält keinen 'hardware'-Block")
     return _platform_from_hardware(
