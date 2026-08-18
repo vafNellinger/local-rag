@@ -56,7 +56,7 @@ Version: ${VERSION}
 Section: utils
 Priority: optional
 Architecture: ${ARCH}
-Depends: libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37, libgtk-3-0, libgirepository-1.0-1
+Depends: libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37, libgtk-3-0, libglib2.0-0, libgirepository-1.0-1
 Recommends: gir1.2-webkit2-4.1 | gir1.2-webkit2-4.0
 Installed-Size: ${INSTALLED_KB}
 Maintainer: Niklas Nellinger <niklas.nellinger@vonaffenfels.de>
