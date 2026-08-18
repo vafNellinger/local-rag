@@ -130,9 +130,12 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           # choco legt makensis unter Program Files ab, aber nicht in den
-          # Git-Bash-PATH — deshalb der volle Pfad.
+          # Git-Bash-PATH — deshalb der volle Pfad. Und NSIS' File-Direktive
+          # braucht einen echten Windows-Pfad mit Backslashes (cygpath -w),
+          # ein Git-Bash-Pfad mit / findet keine Dateien.
+          SRC_WIN="$(cygpath -w "$PWD/dist/local-rag")"
           "/c/Program Files (x86)/NSIS/makensis.exe" \
-            -DVERSION="$APP_VERSION" -DSRC=dist/local-rag \
+            -DVERSION="$APP_VERSION" -DSRC="$SRC_WIN" \
             -DOUTFILE="local-rag-setup-$APP_VERSION.exe" \
             packaging/nsis/local-rag.nsi
 

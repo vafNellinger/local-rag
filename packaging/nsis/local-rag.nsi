@@ -53,7 +53,9 @@ SetCompressor /SOLID lzma
 Section "local-rag" SecMain
   SectionIn RO
   SetOutPath "$INSTDIR"
-  File /r "${SRC}/*"
+  ; Backslash-Pfad: Windows-makensis findet mit / keine Dateien. Der Aufrufer
+  ; übergibt SRC als absoluten Windows-Pfad (cygpath -w).
+  File /r "${SRC}\*"
 
   CreateDirectory "$SMPROGRAMS\${APPNAME}"
   CreateShortcut "$SMPROGRAMS\${APPNAME}\${APPNAME}.lnk" "$INSTDIR\${APPNAME}.exe"
