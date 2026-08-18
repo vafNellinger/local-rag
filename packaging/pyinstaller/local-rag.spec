@@ -13,6 +13,7 @@ import os
 import sys
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks.gi import get_gi_typelibs
 
 # PyInstaller löst Pfade relativ zum Spec-Verzeichnis auf, nicht zum CWD —
 # deshalb alles absolut über SPECPATH, damit der Aufruf von überall klappt.
@@ -59,16 +60,7 @@ hiddenimports += collect_submodules("transformers")
 # System-Abhängigkeit über das .deb (Depends), das ist auf Debian robuster als
 # der Versuch, den ganzen WebKit-Prozessbaum einzupacken.
 if sys.platform.startswith("linux"):
-    hiddenimports += [
-        "gi",
-        "gi.repository.GLib",
-        "gi.repository.Gio",
-        "gi.repository.GObject",
-        "gi.repository.Gtk",
-        "gi.repository.Gdk",
-        "gi.repository.WebKit2",
-        "gi.repository.Soup",
-    ]
+    # Das gi-Python-Paket samt Basis-Typelibs.
     try:
         d, b, h = collect_all("gi")
         datas += d
@@ -76,6 +68,21 @@ if sys.platform.startswith("linux"):
         hiddenimports += h
     except Exception as exc:
         print(f"collect_all(gi) übersprungen: {exc}")
+    # WebKit2 (und seine Abhängigkeiten) importiert pywebview erst beim Öffnen
+    # des Fensters — PyInstaller erkennt die Typelibs deshalb nicht von selbst,
+    # ein bloßer hiddenimport löst den gi-Hook nicht aus. Hier explizit: die
+    # Typelibs landen in binaries (→ gi_typelibs/), die schweren .so-Libs (in
+    # datas) lassen wir bewusst weg — libwebkit2gtk startet Hilfsprozesse aus
+    # /usr/libexec, die sich nicht sauber bündeln lassen; sie kommen samt der
+    # Bibliothek vom System (.deb Depends). Lokal verifiziert: mit der Typelib
+    # im Bundle und der System-.so öffnet das native Fenster.
+    for _ns, _ver in (("WebKit2", "4.1"), ("JavaScriptCore", "4.1"), ("Soup", "3.0"), ("Gtk", "3.0")):
+        try:
+            _d, _b, _h = get_gi_typelibs(_ns, _ver)
+            binaries += _b
+            hiddenimports += _h
+        except Exception as exc:
+            print(f"get_gi_typelibs({_ns}) übersprungen: {exc}")
 
 # Projekt-Konfiguration muss ins Bundle (Modelle/Geräte pro Plattformklasse).
 datas += [(os.path.join(_ROOT, "config", "platforms.toml"), "config")]

@@ -129,7 +129,10 @@ jobs:
       - name: Installer NSIS (Windows)
         if: runner.os == 'Windows'
         run: |
-          makensis -DVERSION="$APP_VERSION" -DSRC=dist/local-rag \
+          # choco legt makensis unter Program Files ab, aber nicht in den
+          # Git-Bash-PATH — deshalb der volle Pfad.
+          "/c/Program Files (x86)/NSIS/makensis.exe" \
+            -DVERSION="$APP_VERSION" -DSRC=dist/local-rag \
             -DOUTFILE="local-rag-setup-$APP_VERSION.exe" \
             packaging/nsis/local-rag.nsi
 
