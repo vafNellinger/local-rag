@@ -72,3 +72,27 @@ def test_probe_falls_back_to_cli_without_import(monkeypatch):
     monkeypatch.setattr(detect, "run_whichllm", lambda *a, **k: fake_json)
     platform = detect.detect_local()
     assert platform.platform_class == "cpu_only"
+
+
+def test_whichllm_stdout_prefers_inprocess_when_frozen(monkeypatch):
+    """Im Bundle (sys.frozen) läuft whichllm in-process, kein Subprozess."""
+    monkeypatch.setattr(detect.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(detect, "_run_whichllm_inprocess", lambda a: '{"ok": 1}')
+
+    def no_subprocess(*args, **kwargs):
+        raise AssertionError("im Bundle darf kein Subprozess laufen")
+
+    monkeypatch.setattr(detect.subprocess, "run", no_subprocess)
+    assert detect._whichllm_stdout(["whichllm", "--json"], timeout=5) == '{"ok": 1}'
+
+
+def test_whichllm_stdout_falls_back_to_inprocess_without_cli(monkeypatch):
+    """Ohne CLI im PATH greift der In-Process-Weg auch außerhalb des Bundles."""
+    monkeypatch.setattr(detect.sys, "frozen", False, raising=False)
+
+    def no_cli(*args, **kwargs):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(detect.subprocess, "run", no_cli)
+    monkeypatch.setattr(detect, "_run_whichllm_inprocess", lambda a: '{"fallback": 1}')
+    assert detect._whichllm_stdout(["whichllm", "--json"], timeout=5) == '{"fallback": 1}'

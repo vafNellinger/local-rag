@@ -19,6 +19,7 @@ import hashlib
 import json
 import logging
 import subprocess
+import sys
 import time
 import tomllib
 from dataclasses import dataclass
@@ -125,36 +126,77 @@ def run_whichllm(
                 logger.warning("Cache-Datei defekt, wird neu geholt: %s", cache_file)
 
     logger.info("whichllm wird aufgerufen: %s", " ".join(full_args))
-    try:
-        proc = subprocess.run(
-            full_args,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except FileNotFoundError as exc:
-        raise WhichllmError(
-            "whichllm-CLI nicht im PATH gefunden (wird fürs Modell-Ranking "
-            "gebraucht; die Hardware-Erkennung läuft ohne CLI)."
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise WhichllmError(f"whichllm-Timeout nach {timeout}s") from exc
+    stdout = _whichllm_stdout(full_args, timeout=timeout)
 
     # whichllm beendet sich bei Argumentfehlern mit Code 0 und schreibt die
-    # Fehlermeldung nach stdout (siehe `whichllm hardware --json`), deshalb
-    # reicht die Prüfung des Exit-Codes allein nicht — wir müssen das Parsen
-    # als eigentlichen Erfolgstest behandeln.
+    # Fehlermeldung nach stdout, deshalb ist das Parsen der eigentliche
+    # Erfolgstest, nicht der Exit-Code.
     try:
-        data = json.loads(proc.stdout)
+        data = json.loads(stdout)
     except json.JSONDecodeError as exc:
-        detail = (proc.stdout or proc.stderr or "").strip()[:400]
-        raise WhichllmError(
-            f"whichllm lieferte kein JSON (Exit {proc.returncode}): {detail}"
-        ) from exc
+        detail = (stdout or "").strip()[:400]
+        raise WhichllmError(f"whichllm lieferte kein JSON: {detail}") from exc
 
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache_file.write_text(json.dumps(data))
     return data
+
+
+def _whichllm_stdout(full_args: list[str], *, timeout: int) -> str:
+    """whichllm ausführen und dessen JSON-stdout liefern.
+
+    Im gebündelten Programm gibt es kein externes ``whichllm``-CLI im PATH —
+    dann wird die typer-App direkt in-process aufgerufen. Sonst als Subprozess
+    (das isoliert whichllms globalen Zustand sauber); fehlt das CLI auch dort,
+    greift ebenfalls der In-Process-Weg.
+    """
+    if getattr(sys, "frozen", False):
+        out = _run_whichllm_inprocess(full_args)
+        if out is not None:
+            return out
+    try:
+        proc = subprocess.run(
+            full_args, capture_output=True, text=True, timeout=timeout
+        )
+    except FileNotFoundError as exc:
+        out = _run_whichllm_inprocess(full_args)
+        if out is not None:
+            return out
+        raise WhichllmError(
+            "whichllm ist weder als CLI im PATH noch importierbar."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise WhichllmError(f"whichllm-Timeout nach {timeout}s") from exc
+    return proc.stdout or proc.stderr or ""
+
+
+def _run_whichllm_inprocess(full_args: list[str]) -> str | None:
+    """whichllm über den Direktaufruf seiner typer-App ausführen.
+
+    Fängt die ``--json``-Ausgabe von stdout ab — so braucht das gebündelte
+    Programm kein externes CLI. ``None``, wenn whichllm nicht importierbar ist.
+    """
+    try:
+        import contextlib
+        import io
+
+        import click
+        from whichllm.cli import app as whichllm_app
+    except Exception as exc:  # whichllm nicht importierbar
+        logger.debug("whichllm nicht importierbar (In-Process): %s", exc)
+        return None
+    buf = io.StringIO()
+    old_argv = sys.argv
+    sys.argv = list(full_args)
+    try:
+        with contextlib.redirect_stdout(buf):
+            try:
+                whichllm_app(standalone_mode=False)
+            except (SystemExit, click.exceptions.ClickException):
+                pass
+    finally:
+        sys.argv = old_argv
+    return buf.getvalue()
 
 
 def classify(
