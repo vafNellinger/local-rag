@@ -2,13 +2,19 @@ name: Build desktop bundles
 
 # Baut auf GitHubs kostenlosen Runnern je Betriebssystem ein PyInstaller-Bundle
 # und daraus einen per Wizard installierbaren Installer:
-#   Linux   → .deb            (Bundle nach /opt, Menü-Eintrag, WebKit als Depends)
+#   Linux   → .deb            (Bundle nach /opt, Menü-Eintrag)
 #   Windows → NSIS-Setup.exe  (Per-User, Startmenü, Deinstaller)
 #   macOS   → .dmg            (.app zum Ziehen nach /Programme)
-# Signierung passiert optional, sobald die passenden Secrets hinterlegt sind
-# (siehe docs/standalone-app/06-installer-signing.md) — ohne Secrets bleibt der
-# Installer unsigniert, der Build läuft trotzdem durch.
-# Manuell auslösbar und bei Versions-Tags.
+#
+# Linux läuft bewusst in einem debian:trixie-CONTAINER statt auf ubuntu-latest:
+# nur so passen die gebündelten GTK/GLib-Bibliotheken exakt zur System-WebKit
+# auf Debian 13. Ein auf ubuntu-24.04 gebautes Bundle mischt ältere Libs mit
+# neueren Debian-System-Libs und das native Fenster stirbt an
+# GLib-Versionskonflikten (undefined symbol g_variant_builder_init_static).
+# Lokal im Container verifiziert: so öffnet das eigenständige Fenster.
+#
+# Signierung passiert optional, sobald die Secrets hinterlegt sind
+# (docs/standalone-app/06-installer-signing.md). Manuell auslösbar und bei Tags.
 
 on:
   workflow_dispatch:
@@ -16,21 +22,18 @@ on:
     tags: ["v*"]
 
 jobs:
+  # Windows und macOS auf den nativen Runnern (dort gibt es keine GLib-Kette).
   build:
     name: Bundle (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            artifact: local-rag-linux-x64
           - os: windows-latest
             artifact: local-rag-windows-x64
           - os: macos-latest
             artifact: local-rag-macos-arm64
     runs-on: ${{ matrix.os }}
-    # bash auf allen dreien (auch Windows, via Git Bash) — sonst scheitert die
-    # \-Zeilenfortsetzung an PowerShell.
     defaults:
       run:
         shell: bash
@@ -50,25 +53,11 @@ jobs:
             V="0.1.0"
           fi
           echo "APP_VERSION=$V" >> "$GITHUB_ENV"
-          echo "Version: $V"
 
-      # --- System-Abhängigkeiten -------------------------------------------
-      # Linux: PyGObject/WebKit fürs native Fenster, dpkg/fakeroot fürs .deb.
-      - name: System-Abhängigkeiten (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libgirepository1.0-dev libcairo2-dev pkg-config \
-            gir1.2-webkit2-4.1 libwebkit2gtk-4.1-0 \
-            fakeroot dpkg-dev || true
-
-      # Windows: NSIS für den Setup-Wizard.
       - name: NSIS installieren (Windows)
         if: runner.os == 'Windows'
         run: choco install nsis -y --no-progress
 
-      # --- Python-Abhängigkeiten -------------------------------------------
       - name: Python-Abhängigkeiten
         run: |
           python -m pip install --upgrade pip
@@ -77,16 +66,6 @@ jobs:
             # (BadZipFile). Stattdessen aus dem sdist mit Metal kompilieren.
             CMAKE_ARGS="-DGGML_METAL=on" pip install --no-binary llama-cpp-python llama-cpp-python
             pip install -e ".[ingest,generate,gui,native,onnx]"
-          elif [ "${{ runner.os }}" = "Linux" ]; then
-            # torch als CPU-Build ZUERST installieren: das PyPI-Linux-Wheel ist
-            # der CUDA-Build (~2 GB, zieht nvidia-*-Pakete). Vorab vom CPU-Index,
-            # damit docling/sentence-transformers ihn nicht durch CUDA ersetzen.
-            pip install torch --index-url https://download.pytorch.org/whl/cpu
-            # PyGObject fürs native Fenster (bindet an die System-libgirepository;
-            # < 3.52, damit es bei girepository-1.0 / WebKit2-4.1 bleibt).
-            pip install "PyGObject<3.52"
-            pip install -e ".[ingest,generate,gui,native,onnx]" \
-              --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
           else
             # Windows: PyPI-torch ist bereits CPU-only.
             pip install -e ".[ingest,generate,gui,native,onnx]" \
@@ -94,11 +73,9 @@ jobs:
           fi
           pip install pyinstaller
 
-      # --- Bundle -----------------------------------------------------------
       - name: Bundle bauen
         run: pyinstaller packaging/pyinstaller/local-rag.spec --noconfirm --clean
 
-      # --- macOS: App signieren (optional, vor dem .dmg) --------------------
       - name: Signieren – macOS App (optional)
         if: runner.os == 'macOS'
         env:
@@ -121,18 +98,12 @@ jobs:
           rm -f cert.p12
           echo "App signiert mit: $MACOS_SIGN_IDENTITY"
 
-      # --- Installer je OS --------------------------------------------------
-      - name: Installer .deb (Linux)
-        if: runner.os == 'Linux'
-        run: bash packaging/deb/build-deb.sh "$APP_VERSION" dist/local-rag .
-
       - name: Installer NSIS (Windows)
         if: runner.os == 'Windows'
         run: |
           # choco legt makensis unter Program Files ab, aber nicht in den
           # Git-Bash-PATH — deshalb der volle Pfad. Und NSIS' File-Direktive
-          # braucht einen echten Windows-Pfad mit Backslashes (cygpath -w),
-          # ein Git-Bash-Pfad mit / findet keine Dateien.
+          # braucht einen echten Windows-Pfad mit Backslashes (cygpath -w).
           SRC_WIN="$(cygpath -w "$PWD/dist/local-rag")"
           "/c/Program Files (x86)/NSIS/makensis.exe" \
             -DVERSION="$APP_VERSION" -DSRC="$SRC_WIN" \
@@ -143,7 +114,6 @@ jobs:
         if: runner.os == 'macOS'
         run: bash packaging/macos/build-dmg.sh "$APP_VERSION" dist/local-rag.app .
 
-      # --- Windows: Setup signieren (optional, nach NSIS) -------------------
       - name: Signieren – Windows Setup (optional)
         if: runner.os == 'Windows'
         env:
@@ -162,7 +132,6 @@ jobs:
           rm -f cert.pfx
           echo "Installer signiert."
 
-      # --- macOS: .dmg notarisieren (optional, nach dem Bau) ----------------
       - name: Notarisieren – macOS .dmg (optional)
         if: runner.os == 'macOS'
         env:
@@ -181,18 +150,14 @@ jobs:
           xcrun stapler staple "local-rag-$APP_VERSION.dmg"
           echo ".dmg notarisiert und gestapelt."
 
-      # --- Artefakte: Bundle-Archiv + Installer -----------------------------
       - name: Artefakte einsammeln
         run: |
           mkdir -p out
           if [ "${{ runner.os }}" = "Windows" ]; then
             (cd dist && 7z a "../out/${{ matrix.artifact }}.zip" local-rag >/dev/null)
-          elif [ "${{ runner.os }}" = "macOS" ]; then
-            (cd dist && tar czf "../out/${{ matrix.artifact }}.tar.gz" local-rag.app)
           else
-            (cd dist && tar czf "../out/${{ matrix.artifact }}.tar.gz" local-rag)
+            (cd dist && tar czf "../out/${{ matrix.artifact }}.tar.gz" local-rag.app)
           fi
-          mv local-rag_*_*.deb out/ 2>/dev/null || true
           mv local-rag-setup-*.exe out/ 2>/dev/null || true
           mv local-rag-*.dmg out/ 2>/dev/null || true
           ls -la out
@@ -200,6 +165,72 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
+          path: out/*
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Linux im Debian-trixie-Container (Begründung siehe Kopf).
+  build-linux:
+    name: Bundle (debian-trixie)
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Systempakete zuerst (der Container ist nackt): Python, Build-Werkzeuge,
+      # PyGObject/WebKit fürs native Fenster, dpkg/fakeroot fürs .deb, git für
+      # den Checkout.
+      - name: Systempakete
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            python3 python3-venv python3-dev python3-pip \
+            git ca-certificates build-essential cmake pkg-config \
+            libgirepository1.0-dev libcairo2-dev \
+            gir1.2-webkit2-4.1 libwebkit2gtk-4.1-0 \
+            fakeroot dpkg-dev
+
+      - uses: actions/checkout@v4
+
+      - name: Version bestimmen
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            V="${{ github.ref_name }}"; V="${V#v}"
+          else
+            V="0.1.0"
+          fi
+          echo "APP_VERSION=$V" >> "$GITHUB_ENV"
+
+      - name: Bundle bauen
+        run: |
+          python3 -m venv /venv
+          . /venv/bin/activate
+          pip install --upgrade pip
+          # torch-CPU explizit (das PyPI-Linux-Wheel wäre der ~2 GB CUDA-Build).
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          # PyGObject < 3.52 bleibt bei girepository-1.0 / WebKit2-4.1 (Debian 13
+          # hat kein girepository-2.0, das 3.52+ verlangt).
+          pip install "PyGObject<3.52"
+          pip install -e ".[ingest,generate,gui,native,onnx]" \
+            --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+          pip install pyinstaller
+          pyinstaller packaging/pyinstaller/local-rag.spec --noconfirm --clean
+
+      - name: Installer .deb
+        run: bash packaging/deb/build-deb.sh "$APP_VERSION" dist/local-rag .
+
+      - name: Artefakte einsammeln
+        run: |
+          mkdir -p out
+          tar czf "out/local-rag-linux-x64.tar.gz" -C dist local-rag
+          mv local-rag_*_*.deb out/ 2>/dev/null || true
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: local-rag-linux-x64
           path: out/*
           if-no-files-found: warn
           retention-days: 14

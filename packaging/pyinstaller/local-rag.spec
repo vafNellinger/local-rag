@@ -103,26 +103,6 @@ a = Analysis(
     noarchive=False,
 )
 
-# Auf Linux die GLib-Kernbibliotheken NICHT mitliefern: das native Fenster
-# nutzt die System-WebKit, und deren GLib-Version muss mit der zur Laufzeit
-# geladenen GLib übereinstimmen. Eine ältere gebündelte GLib (von der
-# Build-Distro, hier ubuntu-24.04) kollidiert sonst mit neuerer System-WebKit —
-# der Fensterprozess stirbt an "undefined symbol: g_variant_builder_init_static"
-# (aus libsecret/libjavascriptcore). Lokal verifiziert: ohne die gebündelte
-# GLib öffnet das Fenster mit der System-GLib. Die Bibliotheken kommen als
-# .deb Depends (über libgtk-3-0/libwebkit2gtk) vom System.
-if sys.platform.startswith("linux"):
-    _glib_core = (
-        "libglib-2.0.so",
-        "libgobject-2.0.so",
-        "libgio-2.0.so",
-        "libgmodule-2.0.so",
-    )
-    a.binaries = [
-        b for b in a.binaries
-        if not os.path.basename(b[0]).startswith(_glib_core)
-    ]
-
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
